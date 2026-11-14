@@ -1,25 +1,41 @@
-import { Container } from 'typedi';
+import {
+	createWorkflow,
+	shareWorkflowWithUsers,
+	createTeamProject,
+	linkUserToProject,
+	randomCredentialPayload,
+	randomCredentialPayloadWithOauthTokenData,
+	testDb,
+	mockInstance,
+} from '@n8n/backend-test-utils';
+import type { Person, Project, User, ListQueryDb } from '@n8n/db';
+import {
+	CredentialsRepository,
+	GLOBAL_MEMBER_ROLE,
+	ProjectRepository,
+	SharedCredentialsRepository,
+} from '@n8n/db';
+import { Container } from '@n8n/di';
+import type { ProjectRole } from '@n8n/permissions';
+import { PERSONAL_SPACE_SHARING_SETTING } from '@n8n/permissions';
 import { In } from '@n8n/typeorm';
+import { mock, type MockProxy } from 'vitest-mock-extended';
 
 import config from '@/config';
-import type { ListQuery } from '@/requests';
-import type { User } from '@db/entities/User';
-import { SharedCredentialsRepository } from '@db/repositories/sharedCredentials.repository';
-import { ProjectRepository } from '@db/repositories/project.repository';
-import type { Project } from '@db/entities/Project';
-import { ProjectService } from '@/services/project.service';
-import { UserManagementMailer } from '@/UserManagement/email';
+import { CredentialsService } from '@/credentials/credentials.service';
+import { CredentialsTester } from '@/services/credentials-tester.service';
+import { ProjectService } from '@/services/project.service.ee';
+import { EventService, RoleCacheService } from '@n8n/backend-services';
+import { SecuritySettingsService } from '@/services/security-settings.service';
+import { UserManagementMailer } from '@/user-management/email';
 
-import { randomCredentialPayload } from '../shared/random';
-import * as testDb from '../shared/testDb';
-import type { SaveCredentialFunction } from '../shared/types';
-import * as utils from '../shared/utils';
 import {
 	affixRoleToSaveCredential,
 	getCredentialSharings,
 	shareCredentialWithProjects,
 	shareCredentialWithUsers,
 } from '../shared/db/credentials';
+import { createCustomRoleWithScopeSlugs } from '../shared/db/roles';
 import {
 	createAdmin,
 	createManyUsers,
@@ -27,10 +43,8 @@ import {
 	createUser,
 	createUserShell,
 } from '../shared/db/users';
-import type { SuperAgentTest } from '../shared/types';
-import { mockInstance } from '../../shared/mocking';
-import { createTeamProject, linkUserToProject } from '../shared/db/projects';
-import { createWorkflow, shareWorkflowWithUsers } from '@test-integration/db/workflows';
+import type { SaveCredentialFunction, SuperAgentTest } from '../shared/types';
+import * as utils from '../shared/utils';
 
 const testServer = utils.setupTestServer({
 	endpointGroups: ['credentials'],
@@ -40,7 +54,7 @@ const testServer = utils.setupTestServer({
 	},
 });
 
-let owner: User;
+let owner: Person;
 let admin: User;
 let ownerPersonalProject: Project;
 let member: User;
@@ -48,6 +62,7 @@ let memberPersonalProject: Project;
 let anotherMember: User;
 let anotherMemberPersonalProject: Project;
 let authOwnerAgent: SuperAgentTest;
+let authMemberAgent: SuperAgentTest;
 let authAnotherMemberAgent: SuperAgentTest;
 let saveCredential: SaveCredentialFunction;
 const mailer = mockInstance(UserManagementMailer);
@@ -55,8 +70,14 @@ const mailer = mockInstance(UserManagementMailer);
 let projectService: ProjectService;
 let projectRepository: ProjectRepository;
 
+beforeAll(async () => {
+	await Container.get(RoleCacheService).refreshCache();
+
+	await utils.initCredentialsTypes();
+});
+
 beforeEach(async () => {
-	await testDb.truncate(['SharedCredentials', 'Credentials', 'Project', 'ProjectRelation']);
+	await testDb.truncate(['SharedCredentials', 'CredentialsEntity', 'Project', 'ProjectRelation']);
 	projectRepository = Container.get(ProjectRepository);
 	projectService = Container.get(ProjectService);
 
@@ -64,22 +85,23 @@ beforeEach(async () => {
 	admin = await createAdmin();
 	ownerPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(owner.id);
 
-	member = await createUser({ role: 'global:member' });
+	member = await createUser({ role: { slug: 'global:member' } });
 	memberPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(member.id);
 
-	anotherMember = await createUser({ role: 'global:member' });
+	anotherMember = await createUser({ role: { slug: 'global:member' } });
 	anotherMemberPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 		anotherMember.id,
 	);
 
 	authOwnerAgent = testServer.authAgentFor(owner);
+	authMemberAgent = testServer.authAgentFor(member);
 	authAnotherMemberAgent = testServer.authAgentFor(anotherMember);
 
 	saveCredential = affixRoleToSaveCredential('credential:owner');
 });
 
 afterEach(() => {
-	jest.clearAllMocks();
+	vi.clearAllMocks();
 });
 
 describe('POST /credentials', () => {
@@ -92,7 +114,24 @@ describe('POST /credentials', () => {
 			.post('/credentials')
 			.send({ ...randomCredentialPayload(), projectId: teamProject.id });
 
-		expect(response.statusCode).toBe(400);
+		expect(response.statusCode).toBe(403);
+		expect(response.body.message).toBe(
+			"You don't have the permissions to save the credential in this project.",
+		);
+	});
+
+	test('chat users cannot create credentials', async () => {
+		const chatUser = await createUser({ role: { slug: 'global:chatUser' } });
+		const chatUserPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
+			chatUser.id,
+		);
+
+		const response = await testServer
+			.authAgentFor(chatUser)
+			.post('/credentials')
+			.send({ ...randomCredentialPayload(), projectId: chatUserPersonalProject.id });
+
+		expect(response.statusCode).toBe(403);
 		expect(response.body.message).toBe(
 			"You don't have the permissions to save the credential in this project.",
 		);
@@ -105,7 +144,7 @@ describe('POST /credentials', () => {
 describe('GET /credentials', () => {
 	test('should return all creds for owner', async () => {
 		const [member1, member2, member3] = await createManyUsers(3, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 		const member1PersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 			member1.id,
@@ -127,13 +166,14 @@ describe('GET /credentials', () => {
 
 		expect(response.statusCode).toBe(200);
 		expect(response.body.data).toHaveLength(2); // owner retrieved owner cred and member cred
-		const ownerCredential: ListQuery.Credentials.WithOwnedByAndSharedWith = response.body.data.find(
-			(e: ListQuery.Credentials.WithOwnedByAndSharedWith) =>
-				e.homeProject?.id === ownerPersonalProject.id,
-		);
-		const memberCredential: ListQuery.Credentials.WithOwnedByAndSharedWith =
+		const ownerCredential: ListQueryDb.Credentials.WithOwnedByAndSharedWith =
 			response.body.data.find(
-				(e: ListQuery.Credentials.WithOwnedByAndSharedWith) =>
+				(e: ListQueryDb.Credentials.WithOwnedByAndSharedWith) =>
+					e.homeProject?.id === ownerPersonalProject.id,
+			);
+		const memberCredential: ListQueryDb.Credentials.WithOwnedByAndSharedWith =
+			response.body.data.find(
+				(e: ListQueryDb.Credentials.WithOwnedByAndSharedWith) =>
 					e.homeProject?.id === member1PersonalProject.id,
 			);
 
@@ -152,7 +192,7 @@ describe('GET /credentials', () => {
 		expect(Array.isArray(ownerCredential.sharedWithProjects)).toBe(true);
 		expect(ownerCredential.sharedWithProjects).toHaveLength(3);
 
-		// Fix order issue (MySQL might return items in any order)
+		// Fix order issue (PostgreSQL might return items in any order)
 		const ownerCredentialsSharedWithOrdered = [...ownerCredential.sharedWithProjects].sort(
 			(a, b) => (a.id < b.id ? -1 : 1),
 		);
@@ -177,7 +217,7 @@ describe('GET /credentials', () => {
 
 	test('should return only relevant creds for member', async () => {
 		const [member1, member2] = await createManyUsers(2, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 		const member1PersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 			member1.id,
@@ -198,7 +238,7 @@ describe('GET /credentials', () => {
 		expect(response.statusCode).toBe(200);
 		expect(response.body.data).toHaveLength(1); // member retrieved only member cred
 
-		const [member1Credential]: [ListQuery.Credentials.WithOwnedByAndSharedWith] =
+		const [member1Credential]: [ListQueryDb.Credentials.WithOwnedByAndSharedWith] =
 			response.body.data;
 
 		validateMainCredentialData(member1Credential);
@@ -222,12 +262,12 @@ describe('GET /credentials', () => {
 		//
 		// ARRANGE
 		//
-		const project1 = await projectService.createTeamProject('Team Project', member);
-		await projectService.addUser(project1.id, anotherMember.id, 'project:editor');
+		const project1 = await projectService.createTeamProject(member, { name: 'Team Project' });
+		await projectService.addUser(project1.id, { userId: anotherMember.id, role: 'project:editor' });
 		// anotherMember should see this one
 		const credential1 = await saveCredential(randomCredentialPayload(), { project: project1 });
 
-		const project2 = await projectService.createTeamProject('Team Project', member);
+		const project2 = await projectService.createTeamProject(member, { name: 'Team Project' });
 		// anotherMember should NOT see this one
 		await saveCredential(randomCredentialPayload(), { project: project2 });
 
@@ -252,11 +292,13 @@ describe('GET /credentials/for-workflow', () => {
 			['workflowId', 'owner', () => owner],
 			['projectId', 'owner', () => owner],
 		])(
-			'it will only return the credentials in that project if "%s" is used as the query parameter and the actor is a "%s"',
+			'returns the credentials in that project and the actor\'s own if "%s" is used as the query parameter and the actor is a "%s"',
 			async (_, queryParam, actorGetter) => {
 				const actor = actorGetter();
-				// Credential in personal project that should not be returned
-				await saveCredential(randomCredentialPayload(), { user: actor });
+				// The actor's own credential travels with them into the project
+				const personalCredential = await saveCredential(randomCredentialPayload(), {
+					user: actor,
+				});
 
 				const teamProject = await createTeamProject();
 				await linkUserToProject(actor, teamProject, 'project:viewer');
@@ -275,14 +317,168 @@ describe('GET /credentials/for-workflow', () => {
 								: { projectId: teamProject.id },
 						);
 					expect(response.statusCode).toBe(200);
-					expect(response.body.data).toHaveLength(1);
+					expect(response.body.data).toHaveLength(2);
 					expect(response.body.data).toContainEqual(
 						expect.objectContaining({
 							id: savedCredential.id,
 							scopes: expect.arrayContaining(['credential:read']),
 						}),
 					);
+					expect(response.body.data).toContainEqual(
+						expect.objectContaining({ id: personalCredential.id, sharedRoute: 'personal' }),
+					);
 				}
+			},
+		);
+
+		test('offers a credential shared directly with the user only to that user', async () => {
+			const teamProject = await createTeamProject();
+			await linkUserToProject(member, teamProject, 'project:editor');
+			await linkUserToProject(anotherMember, teamProject, 'project:editor');
+			const teamWorkflow = await createWorkflow({}, teamProject);
+
+			// owned by the owner, shared directly with member only
+			const sharedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+			await shareCredentialWithUsers(sharedCredential, [member]);
+
+			const memberResponse = await testServer
+				.authAgentFor(member)
+				.get('/credentials/for-workflow')
+				.query({ workflowId: teamWorkflow.id });
+
+			expect(memberResponse.statusCode).toBe(200);
+			expect(memberResponse.body.data).toHaveLength(1);
+			expect(memberResponse.body.data[0]).toMatchObject({
+				id: sharedCredential.id,
+				sharedRoute: 'personal',
+			});
+
+			const anotherMemberResponse = await testServer
+				.authAgentFor(anotherMember)
+				.get('/credentials/for-workflow')
+				.query({ workflowId: teamWorkflow.id });
+
+			expect(anotherMemberResponse.statusCode).toBe(200);
+			expect(anotherMemberResponse.body.data).toEqual([]);
+		});
+
+		test('does not offer a credential shared directly with a user who is not in the project', async () => {
+			const teamProject = await createTeamProject();
+			await linkUserToProject(anotherMember, teamProject, 'project:editor');
+
+			const sharedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+			await shareCredentialWithUsers(sharedCredential, [member]);
+
+			const response = await testServer
+				.authAgentFor(member)
+				.get('/credentials/for-workflow')
+				.query({ projectId: teamProject.id });
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data).toEqual([]);
+		});
+
+		test('omits a credential shared directly with the user when forAgent is true', async () => {
+			const teamProject = await createTeamProject();
+			await linkUserToProject(member, teamProject, 'project:editor');
+
+			const sharedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+			await shareCredentialWithUsers(sharedCredential, [member]);
+
+			const response = await testServer
+				.authAgentFor(member)
+				.get('/credentials/for-workflow')
+				.query({ projectId: teamProject.id, forAgent: 'true' });
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data).toEqual([]);
+		});
+
+		test('offers a credential shared directly with the user when forAgent is false', async () => {
+			const teamProject = await createTeamProject();
+			await linkUserToProject(member, teamProject, 'project:editor');
+
+			const sharedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+			await shareCredentialWithUsers(sharedCredential, [member]);
+
+			const response = await testServer
+				.authAgentFor(member)
+				.get('/credentials/for-workflow')
+				.query({ projectId: teamProject.id, forAgent: 'false' });
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data).toHaveLength(1);
+			expect(response.body.data[0]).toMatchObject({ id: sharedCredential.id });
+		});
+
+		test('keeps the credentials of the project when forAgent is true', async () => {
+			const teamProject = await createTeamProject();
+			await linkUserToProject(member, teamProject, 'project:editor');
+			const projectCredential = await saveCredential(randomCredentialPayload(), {
+				project: teamProject,
+			});
+
+			const response = await testServer
+				.authAgentFor(member)
+				.get('/credentials/for-workflow')
+				.query({ projectId: teamProject.id, forAgent: 'true' });
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data).toHaveLength(1);
+			expect(response.body.data[0]).toMatchObject({ id: projectCredential.id });
+		});
+
+		test('keeps the credentials of the personal project of the user when forAgent is true', async () => {
+			const ownCredential = await saveCredential(randomCredentialPayload(), { user: member });
+
+			const response = await testServer
+				.authAgentFor(member)
+				.get('/credentials/for-workflow')
+				.query({ projectId: memberPersonalProject.id, forAgent: 'true' });
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data).toContainEqual(expect.objectContaining({ id: ownCredential.id }));
+		});
+
+		test('keeps the personal credentials of other users that the owner may use instance-wide when forAgent is true', async () => {
+			const ownCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+			const memberCredential = await saveCredential(randomCredentialPayload(), { user: member });
+
+			const response = await authOwnerAgent
+				.get('/credentials/for-workflow')
+				.query({ projectId: ownerPersonalProject.id, forAgent: 'true' });
+
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data).toContainEqual(expect.objectContaining({ id: ownCredential.id }));
+			expect(response.body.data).toContainEqual(
+				expect.objectContaining({ id: memberCredential.id }),
+			);
+		});
+	});
+
+	describe('forAssistant', () => {
+		test.each(['projectId', 'workflowId'])(
+			'offers the owner only own, shared, and global credentials in their personal project, if "%s" is used',
+			async (queryParam) => {
+				const ownerWorkflow = await createWorkflow({}, owner);
+				const ownCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+				const sharedWithOwner = await saveCredential(randomCredentialPayload(), { user: member });
+				await shareCredentialWithUsers(sharedWithOwner, [owner]);
+				const memberCredential = await saveCredential(randomCredentialPayload(), { user: member });
+				const globalCredential = await saveCredential(randomCredentialPayload(), { user: member });
+				await Container.get(CredentialsRepository).update(globalCredential.id, { isGlobal: true });
+
+				const response = await authOwnerAgent.get('/credentials/for-workflow').query({
+					[queryParam]: queryParam === 'projectId' ? ownerPersonalProject.id : ownerWorkflow.id,
+					forAssistant: 'true',
+				});
+
+				expect(response.statusCode).toBe(200);
+				const ids = response.body.data.map((c: { id: string }) => c.id);
+				expect(ids).toContain(ownCredential.id);
+				expect(ids).toContain(sharedWithOwner.id);
+				expect(ids).toContain(globalCredential.id);
+				expect(ids).not.toContain(memberCredential.id);
 			},
 		);
 	});
@@ -498,6 +694,47 @@ describe('GET /credentials/for-workflow', () => {
 // GET /credentials/:id - fetch a certain credential
 // ----------------------------------------
 describe('GET /credentials/:id', () => {
+	test('should emit `credentials-data-read` when the owner reads the data of a shared credential', async () => {
+		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		await shareCredentialWithUsers(savedCredential, [member]);
+		const emitSpy = vi.spyOn(Container.get(EventService), 'emit');
+
+		try {
+			const response = await authOwnerAgent
+				.get(`/credentials/${savedCredential.id}`)
+				.query({ includeData: true })
+				.expect(200);
+
+			expect(response.body.data.data).toBeDefined();
+			expect(emitSpy).toHaveBeenCalledWith('credentials-data-read', {
+				user: expect.objectContaining({ id: owner.id }),
+				credentialType: savedCredential.type,
+				credentialId: savedCredential.id,
+				publicApi: false,
+			});
+		} finally {
+			emitSpy.mockRestore();
+		}
+	});
+
+	test('should not emit `credentials-data-read` for a member who may only read a shared credential', async () => {
+		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		await shareCredentialWithUsers(savedCredential, [member]);
+		const emitSpy = vi.spyOn(Container.get(EventService), 'emit');
+
+		try {
+			const response = await authMemberAgent
+				.get(`/credentials/${savedCredential.id}`)
+				.query({ includeData: true })
+				.expect(200);
+
+			expect(response.body.data.data).toBeUndefined();
+			expect(emitSpy).not.toHaveBeenCalledWith('credentials-data-read', expect.anything());
+		} finally {
+			emitSpy.mockRestore();
+		}
+	});
+
 	test('project viewers can view credentials', async () => {
 		const teamProject = await createTeamProject();
 		await linkUserToProject(member, teamProject, 'project:viewer');
@@ -513,7 +750,6 @@ describe('GET /credentials/:id', () => {
 		expect(response.statusCode).toBe(200);
 		expect(response.body.data).toMatchObject({
 			id: savedCredential.id,
-			shared: [{ projectId: teamProject.id, role: 'credential:owner' }],
 			homeProject: {
 				id: teamProject.id,
 			},
@@ -530,7 +766,8 @@ describe('GET /credentials/:id', () => {
 
 		expect(firstResponse.statusCode).toBe(200);
 
-		const firstCredential: ListQuery.Credentials.WithOwnedByAndSharedWith = firstResponse.body.data;
+		const firstCredential: ListQueryDb.Credentials.WithOwnedByAndSharedWith =
+			firstResponse.body.data;
 		validateMainCredentialData(firstCredential);
 		expect(firstCredential.data).toBeUndefined();
 
@@ -538,6 +775,7 @@ describe('GET /credentials/:id', () => {
 			id: ownerPersonalProject.id,
 			name: owner.createPersonalProjectName(),
 			type: ownerPersonalProject.type,
+			icon: null,
 		});
 		expect(firstCredential.sharedWithProjects).toHaveLength(0);
 
@@ -552,9 +790,27 @@ describe('GET /credentials/:id', () => {
 		expect(secondCredential.data).toBeDefined();
 	});
 
+	test('should redact the data when `includeData:true` is passed', async () => {
+		const credentialService = Container.get(CredentialsService);
+		const redactSpy = vi.spyOn(credentialService, 'redact');
+		const credential = randomCredentialPayloadWithOauthTokenData();
+		const savedCredential = await saveCredential(credential, {
+			user: owner,
+		});
+
+		const response = await authOwnerAgent
+			.get(`/credentials/${savedCredential.id}`)
+			.query({ includeData: true });
+
+		validateMainCredentialData(response.body.data);
+		expect(response.body.data.data).toBeDefined();
+		expect(response.body.data.data.oauthTokenData).toBe(true);
+		expect(redactSpy).toHaveBeenCalled();
+	});
+
 	test('should retrieve non-owned cred for owner', async () => {
 		const [member1, member2] = await createManyUsers(2, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 		const member1PersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 			member1.id,
@@ -568,7 +824,7 @@ describe('GET /credentials/:id', () => {
 
 		const response1 = await authOwnerAgent.get(`/credentials/${savedCredential.id}`).expect(200);
 
-		const credential: ListQuery.Credentials.WithOwnedByAndSharedWith = response1.body.data;
+		const credential: ListQueryDb.Credentials.WithOwnedByAndSharedWith = response1.body.data;
 
 		validateMainCredentialData(credential);
 		expect(credential.data).toBeUndefined();
@@ -592,7 +848,7 @@ describe('GET /credentials/:id', () => {
 			.query({ includeData: true })
 			.expect(200);
 
-		const credential2: ListQuery.Credentials.WithOwnedByAndSharedWith = response2.body.data;
+		const credential2: ListQueryDb.Credentials.WithOwnedByAndSharedWith = response2.body.data;
 
 		validateMainCredentialData(credential);
 		expect(credential2.data).toBeDefined(); // Instance owners should be capable of editing all credentials
@@ -601,7 +857,7 @@ describe('GET /credentials/:id', () => {
 
 	test('should retrieve owned cred for member', async () => {
 		const [member1, member2, member3] = await createManyUsers(3, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 		const member1PersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 			member1.id,
@@ -620,24 +876,28 @@ describe('GET /credentials/:id', () => {
 			.get(`/credentials/${savedCredential.id}`)
 			.expect(200);
 
-		const firstCredential: ListQuery.Credentials.WithOwnedByAndSharedWith = firstResponse.body.data;
+		const firstCredential: ListQueryDb.Credentials.WithOwnedByAndSharedWith =
+			firstResponse.body.data;
 		validateMainCredentialData(firstCredential);
 		expect(firstCredential.data).toBeUndefined();
 		expect(firstCredential).toMatchObject({
 			homeProject: {
 				id: member1PersonalProject.id,
 				name: member1.createPersonalProjectName(),
+				icon: null,
 				type: 'personal',
 			},
 			sharedWithProjects: expect.arrayContaining([
 				{
 					id: member2PersonalProject.id,
 					name: member2.createPersonalProjectName(),
+					icon: null,
 					type: member2PersonalProject.type,
 				},
 				{
 					id: member3PersonalProject.id,
 					name: member3.createPersonalProjectName(),
+					icon: null,
 					type: member3PersonalProject.type,
 				},
 			]),
@@ -648,7 +908,7 @@ describe('GET /credentials/:id', () => {
 			.query({ includeData: true })
 			.expect(200);
 
-		const secondCredential: ListQuery.Credentials.WithOwnedByAndSharedWith =
+		const secondCredential: ListQueryDb.Credentials.WithOwnedByAndSharedWith =
 			secondResponse.body.data;
 		validateMainCredentialData(secondCredential);
 		expect(secondCredential.data).toBeDefined();
@@ -716,7 +976,7 @@ describe('PUT /credentials/:id/share', () => {
 		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
 
 		const [member1, member2, member3, member4, member5] = await createManyUsers(5, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 		// TODO: write helper for getting multiple personal projects by user id
 		const shareWithProjectIds = (
@@ -764,7 +1024,7 @@ describe('PUT /credentials/:id/share', () => {
 
 	test('should share the credential with the provided userIds', async () => {
 		const [member1, member2, member3] = await createManyUsers(3, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 		const projectIds = (
 			await Promise.all([
@@ -847,7 +1107,7 @@ describe('PUT /credentials/:id/share', () => {
 
 	test('should respond 403 for non-owned credentials for non-shared members sharing', async () => {
 		const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
-		const tempUser = await createUser({ role: 'global:member' });
+		const tempUser = await createUser({ role: { slug: 'global:member' } });
 		const tempUserPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 			tempUser.id,
 		);
@@ -881,7 +1141,7 @@ describe('PUT /credentials/:id/share', () => {
 	});
 
 	test('should not ignore pending sharee', async () => {
-		const memberShell = await createUserShell('global:member');
+		const memberShell = await createUserShell(GLOBAL_MEMBER_ROLE);
 		const memberShellPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
 			memberShell.id,
 		);
@@ -923,6 +1183,57 @@ describe('PUT /credentials/:id/share', () => {
 		expect(mailer.notifyCredentialsShared).toHaveBeenCalledTimes(1);
 	});
 
+	test('should ignore sharing with owner project', async () => {
+		// ARRANGE
+		const project = await projectService.createTeamProject(owner, { name: 'Team Project' });
+		const credential = await saveCredential(randomCredentialPayload(), { project });
+
+		// ACT
+		const response = await authOwnerAgent
+			.put(`/credentials/${credential.id}/share`)
+			.send({ shareWithIds: [project.id] });
+
+		const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+			where: { credentialsId: credential.id },
+		});
+
+		// ASSERT
+		expect(response.statusCode).toBe(200);
+
+		expect(sharedCredentials).toHaveLength(1);
+		expect(sharedCredentials[0].projectId).toBe(project.id);
+		expect(sharedCredentials[0].role).toBe('credential:owner');
+	});
+
+	test('should ignore sharing with project that already has it shared', async () => {
+		// ARRANGE
+		const project = await projectService.createTeamProject(owner, { name: 'Team Project' });
+		const credential = await saveCredential(randomCredentialPayload(), { project });
+
+		const project2 = await projectService.createTeamProject(owner, { name: 'Team Project 2' });
+		await shareCredentialWithProjects(credential, [project2]);
+
+		// ACT
+		const response = await authOwnerAgent
+			.put(`/credentials/${credential.id}/share`)
+			.send({ shareWithIds: [project2.id] });
+
+		const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+			where: { credentialsId: credential.id },
+		});
+
+		// ASSERT
+		expect(response.statusCode).toBe(200);
+
+		expect(sharedCredentials).toHaveLength(2);
+		expect(sharedCredentials).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ projectId: project.id, role: 'credential:owner' }),
+				expect.objectContaining({ projectId: project2.id, role: 'credential:user' }),
+			]),
+		);
+	});
+
 	test('should respond 400 if invalid payload is provided', async () => {
 		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
 
@@ -939,7 +1250,7 @@ describe('PUT /credentials/:id/share', () => {
 		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
 
 		const [member1, member2] = await createManyUsers(2, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 
 		await shareCredentialWithUsers(savedCredential, [member1, member2]);
@@ -965,7 +1276,7 @@ describe('PUT /credentials/:id/share', () => {
 		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
 
 		const [member1, member2] = await createManyUsers(2, {
-			role: 'global:member',
+			role: { slug: 'global:member' },
 		});
 
 		await shareCredentialWithUsers(savedCredential, [member1, member2]);
@@ -977,6 +1288,274 @@ describe('PUT /credentials/:id/share', () => {
 		expect(response.statusCode).toBe(200);
 
 		config.set('userManagement.emails.mode', 'smtp');
+	});
+
+	test('member should be able to share from personal project to team project that member has access to', async () => {
+		const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
+
+		const testProject = await createTeamProject();
+		await linkUserToProject(member, testProject, 'project:editor');
+
+		const response = await authMemberAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [testProject.id] });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toBeUndefined();
+
+		const shares = await getCredentialSharings(savedCredential);
+		const testShare = shares.find((s) => s.projectId === testProject.id);
+		expect(testShare).not.toBeUndefined();
+		expect(testShare?.role).toBe('credential:user');
+	});
+
+	test('member should be able to share from team project to personal project', async () => {
+		const testProject = await createTeamProject(undefined, member);
+
+		const savedCredential = await saveCredential(randomCredentialPayload(), {
+			project: testProject,
+		});
+
+		const response = await authMemberAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [anotherMemberPersonalProject.id] });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toBeUndefined();
+
+		const shares = await getCredentialSharings(savedCredential);
+		const testShare = shares.find((s) => s.projectId === anotherMemberPersonalProject.id);
+		expect(testShare).not.toBeUndefined();
+		expect(testShare?.role).toBe('credential:user');
+	});
+
+	test('member should be able to share from team project to team project that member has access to', async () => {
+		const testProject = await createTeamProject(undefined, member);
+		const testProject2 = await createTeamProject();
+		await linkUserToProject(member, testProject2, 'project:editor');
+
+		const savedCredential = await saveCredential(randomCredentialPayload(), {
+			project: testProject,
+		});
+
+		const response = await authMemberAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [testProject2.id] });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toBeUndefined();
+
+		const shares = await getCredentialSharings(savedCredential);
+		const testShare = shares.find((s) => s.projectId === testProject2.id);
+		expect(testShare).not.toBeUndefined();
+		expect(testShare?.role).toBe('credential:user');
+	});
+
+	test('admins should be able to share from any team project to any team project ', async () => {
+		const testProject = await createTeamProject();
+		const testProject2 = await createTeamProject();
+
+		const savedCredential = await saveCredential(randomCredentialPayload(), {
+			project: testProject,
+		});
+
+		const response = await authOwnerAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [testProject2.id] });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toBeUndefined();
+
+		const shares = await getCredentialSharings(savedCredential);
+		const testShare = shares.find((s) => s.projectId === testProject2.id);
+		expect(testShare).not.toBeUndefined();
+		expect(testShare?.role).toBe('credential:user');
+	});
+
+	test("admins should be able to share from any team project to any user's personal project ", async () => {
+		const testProject = await createTeamProject();
+
+		const savedCredential = await saveCredential(randomCredentialPayload(), {
+			project: testProject,
+		});
+
+		const response = await authOwnerAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [memberPersonalProject.id] });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toBeUndefined();
+
+		const shares = await getCredentialSharings(savedCredential);
+		const testShare = shares.find((s) => s.projectId === memberPersonalProject.id);
+		expect(testShare).not.toBeUndefined();
+		expect(testShare?.role).toBe('credential:user');
+	});
+
+	test('admins should be able to share from any personal project to any team project ', async () => {
+		const testProject = await createTeamProject();
+
+		const savedCredential = await saveCredential(randomCredentialPayload(), {
+			user: member,
+		});
+
+		const response = await authOwnerAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [testProject.id] });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toBeUndefined();
+
+		const shares = await getCredentialSharings(savedCredential);
+		const testShare = shares.find((s) => s.projectId === testProject.id);
+		expect(testShare).not.toBeUndefined();
+		expect(testShare?.role).toBe('credential:user');
+	});
+});
+
+describe('PUT /credentials/:id/share - split share/unshare scopes', () => {
+	test('should allow owner to add new shares (share operation)', async () => {
+		const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
+
+		const response = await authMemberAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [anotherMemberPersonalProject.id] });
+
+		expect(response.statusCode).toBe(200);
+
+		const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+			where: { credentialsId: savedCredential.id },
+		});
+		expect(sharedCredentials).toHaveLength(2);
+	});
+
+	test('should allow owner to remove existing shares (unshare operation)', async () => {
+		const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
+		await shareCredentialWithUsers(savedCredential, [anotherMember]);
+
+		// Verify initial state: owner + 1 shared
+		const initialSharing = await Container.get(SharedCredentialsRepository).find({
+			where: { credentialsId: savedCredential.id },
+		});
+		expect(initialSharing).toHaveLength(2);
+
+		// Send empty shareWithIds to remove all shares
+		const response = await authMemberAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [] });
+
+		expect(response.statusCode).toBe(200);
+
+		const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+			where: { credentialsId: savedCredential.id },
+		});
+		expect(sharedCredentials).toHaveLength(1);
+	});
+
+	test('should allow both share and unshare in a single request', async () => {
+		const savedCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		await shareCredentialWithUsers(savedCredential, [member]);
+
+		// Replace member with anotherMember
+		const response = await authOwnerAgent
+			.put(`/credentials/${savedCredential.id}/share`)
+			.send({ shareWithIds: [anotherMemberPersonalProject.id] });
+
+		expect(response.statusCode).toBe(200);
+
+		const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+			where: { credentialsId: savedCredential.id },
+		});
+		expect(sharedCredentials).toHaveLength(2);
+		const projectIds = sharedCredentials.map((sc) => sc.projectId);
+		expect(projectIds).toContain(anotherMemberPersonalProject.id);
+		expect(projectIds).not.toContain(memberPersonalProject.id);
+	});
+
+	describe('personal space sharing disabled', () => {
+		let securitySettingsService: SecuritySettingsService;
+
+		beforeEach(async () => {
+			securitySettingsService = Container.get(SecuritySettingsService);
+		});
+
+		test('should forbid adding new shares when personal space sharing is disabled', async () => {
+			await securitySettingsService.setPersonalSpaceSetting(PERSONAL_SPACE_SHARING_SETTING, false);
+
+			const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
+
+			const response = await authMemberAgent
+				.put(`/credentials/${savedCredential.id}/share`)
+				.send({ shareWithIds: [anotherMemberPersonalProject.id] });
+
+			expect(response.statusCode).toBe(403);
+
+			const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+				where: { credentialsId: savedCredential.id },
+			});
+			expect(sharedCredentials).toHaveLength(1);
+
+			// Re-enable for cleanup
+			await securitySettingsService.setPersonalSpaceSetting(PERSONAL_SPACE_SHARING_SETTING, true);
+		});
+
+		test('should allow removing existing shares when personal space sharing is disabled', async () => {
+			const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
+			await shareCredentialWithUsers(savedCredential, [anotherMember]);
+
+			// Verify initial state
+			const initialSharing = await Container.get(SharedCredentialsRepository).find({
+				where: { credentialsId: savedCredential.id },
+			});
+			expect(initialSharing).toHaveLength(2);
+
+			// Disable personal space sharing
+			await securitySettingsService.setPersonalSpaceSetting(PERSONAL_SPACE_SHARING_SETTING, false);
+
+			// Unshare should still work
+			const response = await authMemberAgent
+				.put(`/credentials/${savedCredential.id}/share`)
+				.send({ shareWithIds: [] });
+
+			expect(response.statusCode).toBe(200);
+
+			const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+				where: { credentialsId: savedCredential.id },
+			});
+			expect(sharedCredentials).toHaveLength(1);
+
+			// Re-enable for cleanup
+			await securitySettingsService.setPersonalSpaceSetting(PERSONAL_SPACE_SHARING_SETTING, true);
+		});
+
+		test('should forbid mixed share+unshare when user lacks share scope', async () => {
+			const savedCredential = await saveCredential(randomCredentialPayload(), { user: member });
+			await shareCredentialWithUsers(savedCredential, [anotherMember]);
+
+			// Disable sharing
+			await securitySettingsService.setPersonalSpaceSetting(PERSONAL_SPACE_SHARING_SETTING, false);
+
+			const tempUser = await createUser({ role: { slug: 'global:member' } });
+			const tempUserPersonalProject = await projectRepository.getPersonalProjectForUserOrFail(
+				tempUser.id,
+			);
+
+			// Try to unshare anotherMember AND share tempUser - should fail because of share
+			const response = await authMemberAgent
+				.put(`/credentials/${savedCredential.id}/share`)
+				.send({ shareWithIds: [tempUserPersonalProject.id] });
+
+			expect(response.statusCode).toBe(403);
+
+			// State should be unchanged
+			const sharedCredentials = await Container.get(SharedCredentialsRepository).find({
+				where: { credentialsId: savedCredential.id },
+			});
+			expect(sharedCredentials).toHaveLength(2);
+
+			// Re-enable for cleanup
+			await securitySettingsService.setPersonalSpaceSetting(PERSONAL_SPACE_SHARING_SETTING, true);
+		});
 	});
 });
 
@@ -992,18 +1571,6 @@ describe('PUT /:credentialId/transfer', () => {
 			.authAgentFor(member)
 			.put(`/credentials/${credential.id}/transfer`)
 			.send({ destinationProjectId: destinationProject.id })
-			.expect(400);
-	});
-
-	test('cannot transfer into a personal project', async () => {
-		const credential = await saveCredential(randomCredentialPayload(), {
-			user: member,
-		});
-
-		await testServer
-			.authAgentFor(member)
-			.put(`/credentials/${credential.id}/transfer`)
-			.send({ destinationProjectId: memberPersonalProject.id })
 			.expect(400);
 	});
 
@@ -1035,192 +1602,335 @@ describe('PUT /:credentialId/transfer', () => {
 			.expect(404);
 	});
 
-	test('project:editors cannot transfer credentials', async () => {
-		//
-		// ARRANGE
-		//
-		const sourceProject = await createTeamProject('Source Project');
-		await linkUserToProject(member, sourceProject, 'project:editor');
-
-		const credential = await saveCredential(randomCredentialPayload(), {
-			project: sourceProject,
-		});
-
-		const destinationProject = await createTeamProject('Destination Project', member);
-
-		//
-		// ACT & ASSERT
-		//
-		await testServer
-			.authAgentFor(member)
-			.put(`/credentials/${credential.id}/transfer`)
-			.send({ destinationProjectId: destinationProject.id })
-			.expect(403);
-	});
-
-	test('transferring from a personal project to a team project severs all sharings', async () => {
-		//
-		// ARRANGE
-		//
-		const credential = await saveCredential(randomCredentialPayload(), { user: member });
-
-		// these sharings should be deleted by the transfer
-		await shareCredentialWithUsers(credential, [anotherMember, owner]);
-
-		const destinationProject = await createTeamProject('Destination Project', member);
-
-		//
-		// ACT
-		//
-		const response = await testServer
-			.authAgentFor(member)
-			.put(`/credentials/${credential.id}/transfer`)
-			.send({ destinationProjectId: destinationProject.id })
-			.expect(200);
-
-		//
-		// ASSERT
-		//
-		expect(response.body).toEqual({});
-
-		const allSharings = await getCredentialSharings(credential);
-		expect(allSharings).toHaveLength(1);
-		expect(allSharings[0]).toMatchObject({
-			projectId: destinationProject.id,
-			credentialsId: credential.id,
-			role: 'credential:owner',
-		});
-	});
-
-	test('can transfer from team to another team project', async () => {
-		//
-		// ARRANGE
-		//
-		const sourceProject = await createTeamProject('Team Project 1', member);
-		const credential = await saveCredential(randomCredentialPayload(), {
-			project: sourceProject,
-		});
-
-		const destinationProject = await createTeamProject('Team Project 2', member);
-
-		//
-		// ACT
-		//
-		const response = await testServer
-			.authAgentFor(member)
-			.put(`/credentials/${credential.id}/transfer`)
-			.send({ destinationProjectId: destinationProject.id })
-			.expect(200);
-
-		//
-		// ASSERT
-		//
-		expect(response.body).toEqual({});
-
-		const allSharings = await getCredentialSharings(credential);
-		expect(allSharings).toHaveLength(1);
-		expect(allSharings[0]).toMatchObject({
-			projectId: destinationProject.id,
-			credentialsId: credential.id,
-			role: 'credential:owner',
-		});
-	});
-
-	test.each([
-		['owners', () => owner],
-		['admins', () => admin],
-	])(
-		'%s can always transfer from any personal or team project into any team project',
-		async (_name, actor) => {
+	test.each<ProjectRole>(['project:editor', 'project:viewer'])(
+		'%ss cannot transfer credentials',
+		async (projectRole) => {
 			//
 			// ARRANGE
 			//
-			const sourceProject = await createTeamProject('Source Project', member);
-			const teamCredential = await saveCredential(randomCredentialPayload(), {
+			const sourceProject = await createTeamProject('Source Project');
+			await linkUserToProject(member, sourceProject, projectRole);
+
+			const credential = await saveCredential(randomCredentialPayload(), {
 				project: sourceProject,
 			});
-
-			const personalCredential = await saveCredential(randomCredentialPayload(), { user: member });
 
 			const destinationProject = await createTeamProject('Destination Project', member);
 
 			//
+			// ACT & ASSERT
+			//
+			await testServer
+				.authAgentFor(member)
+				.put(`/credentials/${credential.id}/transfer`)
+				.send({ destinationProjectId: destinationProject.id })
+				.expect(403);
+		},
+	);
+
+	test.each<
+		[
+			// user role
+			'owners' | 'admins',
+			// source project type
+			'team' | 'personal',
+			// destination project type
+			'team' | 'personal',
+			// actor
+			() => User,
+			// source project
+			() => Promise<Project> | Project,
+			// destination project
+			() => Promise<Project> | Project,
+		]
+	>([
+		// owner
+		[
+			'owners',
+			'team',
+			'team',
+			() => owner,
+			async () => await createTeamProject('Source Project'),
+			async () => await createTeamProject('Destination Project'),
+		],
+		[
+			'owners',
+			'team',
+			'personal',
+			() => owner,
+			async () => await createTeamProject('Source Project'),
+			() => memberPersonalProject,
+		],
+		[
+			'owners',
+			'personal',
+			'team',
+			() => owner,
+			() => memberPersonalProject,
+			async () => await createTeamProject('Destination Project'),
+		],
+
+		// admin
+		[
+			'admins',
+			'team',
+			'team',
+			() => admin,
+			async () => await createTeamProject('Source Project'),
+			async () => await createTeamProject('Destination Project'),
+		],
+		[
+			'admins',
+			'team',
+			'personal',
+			() => admin,
+			async () => await createTeamProject('Source Project'),
+			() => memberPersonalProject,
+		],
+		[
+			'admins',
+			'personal',
+			'team',
+			() => admin,
+			() => memberPersonalProject,
+			async () => await createTeamProject('Destination Project'),
+		],
+	])(
+		'%s can always transfer from a %s project to a %s project',
+		async (
+			_roleName,
+			_sourceProjectName,
+			_destinationProjectName,
+			getUser,
+			getSourceProject,
+			getDestinationProject,
+		) => {
+			// ARRANGE
+			const user = getUser();
+			const sourceProject = await getSourceProject();
+			const destinationProject = await getDestinationProject();
+
+			const credential = await saveCredential(randomCredentialPayload(), {
+				project: sourceProject,
+			});
+
 			// ACT
-			//
-			const response1 = await testServer
-				.authAgentFor(actor())
-				.put(`/credentials/${teamCredential.id}/transfer`)
-				.send({ destinationProjectId: destinationProject.id })
-				.expect(200);
-			const response2 = await testServer
-				.authAgentFor(actor())
-				.put(`/credentials/${personalCredential.id}/transfer`)
+			const response = await testServer
+				.authAgentFor(user)
+				.put(`/credentials/${credential.id}/transfer`)
 				.send({ destinationProjectId: destinationProject.id })
 				.expect(200);
 
-			//
 			// ASSERT
-			//
-			expect(response1.body).toEqual({});
-			expect(response2.body).toEqual({});
+			expect(response.body).toEqual({});
 
 			{
-				const allSharings = await getCredentialSharings(teamCredential);
+				const allSharings = await getCredentialSharings(credential);
 				expect(allSharings).toHaveLength(1);
 				expect(allSharings[0]).toMatchObject({
 					projectId: destinationProject.id,
-					credentialsId: teamCredential.id,
-					role: 'credential:owner',
-				});
-			}
-
-			{
-				const allSharings = await getCredentialSharings(personalCredential);
-				expect(allSharings).toHaveLength(1);
-				expect(allSharings[0]).toMatchObject({
-					projectId: destinationProject.id,
-					credentialsId: personalCredential.id,
+					credentialsId: credential.id,
 					role: 'credential:owner',
 				});
 			}
 		},
 	);
-
-	test.each([
-		['owners', () => owner],
-		['admins', () => admin],
-	])('%s cannot transfer into personal projects', async (_name, actor) => {
-		//
-		// ARRANGE
-		//
-		const sourceProject = await createTeamProject('Source Project', member);
-		const teamCredential = await saveCredential(randomCredentialPayload(), {
-			project: sourceProject,
-		});
-
-		const personalCredential = await saveCredential(randomCredentialPayload(), { user: member });
-
-		const destinationProject = anotherMemberPersonalProject;
-
-		//
-		// ACT & ASSERT
-		//
-		await testServer
-			.authAgentFor(actor())
-			.put(`/credentials/${teamCredential.id}/transfer`)
-			.send({ destinationProjectId: destinationProject.id })
-			.expect(400);
-		await testServer
-			.authAgentFor(actor())
-			.put(`/credentials/${personalCredential.id}/transfer`)
-			.send({ destinationProjectId: destinationProject.id })
-			.expect(400);
-	});
 });
 
-function validateMainCredentialData(credential: ListQuery.Credentials.WithOwnedByAndSharedWith) {
+function validateMainCredentialData(credential: ListQueryDb.Credentials.WithOwnedByAndSharedWith) {
 	expect(typeof credential.name).toBe('string');
 	expect(typeof credential.type).toBe('string');
 	expect(credential.homeProject).toBeDefined();
 	expect(Array.isArray(credential.sharedWithProjects)).toBe(true);
 }
+
+// ----------------------------------------
+// A custom instance role that can see credentials but not use them
+// ----------------------------------------
+
+describe('instance role with credential visibility but not use', () => {
+	// The see-not-use rung: the role holds `credential:list` + `credential:read`
+	// globally, so every credential on the instance is visible, but without
+	// `credential:use` none of them can be selected in a node, tested, probed or run.
+	const VIEW_SCOPES = ['credential:list', 'credential:read'];
+	const USE_SCOPES = [...VIEW_SCOPES, 'credential:use'];
+
+	// Stand in for the real tester so the assertions stay a permission signal and
+	// never reach the network.
+	const mockCredentialsTester = mock<CredentialsTester>();
+	Container.set(CredentialsTester, mockCredentialsTester);
+
+	afterEach(() => {
+		mockCredentialsTester.testCredentials.mockClear();
+	});
+
+	const agentForRoleWith = async (scopeSlugs: string[]) => {
+		const role = await createCustomRoleWithScopeSlugs(scopeSlugs, { roleType: 'global' });
+		const user = await createUser({ role });
+		return { user, agent: testServer.authAgentFor(user) };
+	};
+
+	test("GET /credentials lists another user's personal credential", async () => {
+		const ownerCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		const { agent } = await agentForRoleWith(VIEW_SCOPES);
+
+		const response = await agent.get('/credentials');
+
+		expect(response.statusCode).toBe(200);
+		expect(
+			response.body.data.map((c: ListQueryDb.Credentials.WithOwnedByAndSharedWith) => c.id),
+		).toContain(ownerCredential.id);
+	});
+
+	test('GET /credentials/:id?includeData=true returns metadata without the secret', async () => {
+		const ownerCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		const { agent } = await agentForRoleWith(VIEW_SCOPES);
+
+		const response = await agent
+			.get(`/credentials/${ownerCredential.id}`)
+			.query({ includeData: true });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data.id).toBe(ownerCredential.id);
+		expect(response.body.data.data).toBeUndefined();
+	});
+
+	test('GET /credentials/for-workflow omits it from the node picker', async () => {
+		await saveCredential(randomCredentialPayload(), { user: owner });
+		const { user, agent } = await agentForRoleWith(VIEW_SCOPES);
+		const ownWorkflow = await createWorkflow({}, user);
+
+		const response = await agent
+			.get('/credentials/for-workflow')
+			.query({ workflowId: ownWorkflow.id });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toHaveLength(0);
+	});
+
+	test('POST /credentials/test is refused', async () => {
+		const ownerCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		const { agent } = await agentForRoleWith(VIEW_SCOPES);
+
+		const response = await agent.post('/credentials/test').send({
+			credentials: {
+				id: ownerCredential.id,
+				name: ownerCredential.name,
+				type: ownerCredential.type,
+				data: {},
+			},
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(mockCredentialsTester.testCredentials).not.toHaveBeenCalled();
+	});
+
+	test('POST /credentials/:id/probe is refused', async () => {
+		const ownerCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		const { agent } = await agentForRoleWith(VIEW_SCOPES);
+
+		const response = await agent.post(`/credentials/${ownerCredential.id}/probe`).send({});
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('adding credential:use puts it back in the node picker', async () => {
+		const ownerCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		const { user, agent } = await agentForRoleWith(USE_SCOPES);
+		const ownWorkflow = await createWorkflow({}, user);
+
+		const response = await agent
+			.get('/credentials/for-workflow')
+			.query({ workflowId: ownWorkflow.id });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data.map((c: { id: string }) => c.id)).toContain(ownerCredential.id);
+	});
+
+	test('adding credential:use lets the credential be tested', async () => {
+		mockCredentialsTester.testCredentials.mockResolvedValue({
+			status: 'OK',
+			message: 'Credential tested successfully',
+		});
+		const ownerCredential = await saveCredential(randomCredentialPayload(), { user: owner });
+		const { agent } = await agentForRoleWith(USE_SCOPES);
+
+		const response = await agent.post('/credentials/test').send({
+			credentials: {
+				id: ownerCredential.id,
+				name: ownerCredential.name,
+				type: ownerCredential.type,
+				data: {},
+			},
+		});
+
+		expect(response.statusCode).toBe(200);
+		expect(mockCredentialsTester.testCredentials).toHaveBeenCalled();
+	});
+});
+
+// ----------------------------------------
+// A project viewer can see a credential but not drive it
+// ----------------------------------------
+
+describe('project role with credential visibility but not use', () => {
+	// The project-lane counterpart of the instance rung above: `project:viewer`
+	// holds `credential:read` and nothing beyond it, so the credential is listed
+	// and readable, but it cannot be tested or probed with the viewer's access.
+	const mockCredentialsTester = Container.get(CredentialsTester) as MockProxy<CredentialsTester>;
+
+	afterEach(() => {
+		mockCredentialsTester.testCredentials.mockClear();
+	});
+
+	const credentialInTeamProjectWith = async (role: ProjectRole) => {
+		const project = await createTeamProject();
+		const credential = await saveCredential(randomCredentialPayload(), { project });
+		await linkUserToProject(member, project, role);
+		return credential;
+	};
+
+	test('POST /credentials/test is refused for a project viewer', async () => {
+		const credential = await credentialInTeamProjectWith('project:viewer');
+
+		const response = await authMemberAgent.post('/credentials/test').send({
+			credentials: {
+				id: credential.id,
+				name: credential.name,
+				type: credential.type,
+				data: {},
+			},
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(mockCredentialsTester.testCredentials).not.toHaveBeenCalled();
+	});
+
+	test('POST /credentials/:id/probe is refused for a project viewer', async () => {
+		const credential = await credentialInTeamProjectWith('project:viewer');
+
+		const response = await authMemberAgent.post(`/credentials/${credential.id}/probe`).send({});
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('POST /credentials/test still works for a project editor', async () => {
+		mockCredentialsTester.testCredentials.mockResolvedValue({
+			status: 'OK',
+			message: 'Credential tested successfully',
+		});
+		const credential = await credentialInTeamProjectWith('project:editor');
+
+		const response = await authMemberAgent.post('/credentials/test').send({
+			credentials: {
+				id: credential.id,
+				name: credential.name,
+				type: credential.type,
+				data: {},
+			},
+		});
+
+		expect(response.statusCode).toBe(200);
+		expect(mockCredentialsTester.testCredentials).toHaveBeenCalled();
+	});
+});

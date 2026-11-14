@@ -1,17 +1,14 @@
+import { testDb } from '@n8n/backend-test-utils';
+import { GLOBAL_MEMBER_ROLE, GLOBAL_OWNER_ROLE, type User } from '@n8n/db';
 import nock from 'nock';
-import config from '@/config';
-import { RESPONSE_ERROR_MESSAGES } from '@/constants';
-import type { User } from '@db/entities/User';
-import type { ILicensePostResponse, ILicenseReadResponse } from '@/Interfaces';
-import { License } from '@/License';
 
-import * as testDb from './shared/testDb';
-import * as utils from './shared/utils/';
+import { RESPONSE_ERROR_MESSAGES } from '@/constants';
+import type { ILicensePostResponse, ILicenseReadResponse } from '@/interfaces';
+import { License } from '@/license';
+
 import { createUserShell } from './shared/db/users';
 import type { SuperAgentTest } from './shared/types';
-
-const MOCK_SERVER_URL = 'https://server.com/v1';
-const MOCK_RENEW_OFFSET = 259200;
+import * as utils from './shared/utils/';
 
 let owner: User;
 let member: User;
@@ -21,15 +18,11 @@ let authMemberAgent: SuperAgentTest;
 const testServer = utils.setupTestServer({ endpointGroups: ['license'] });
 
 beforeAll(async () => {
-	owner = await createUserShell('global:owner');
-	member = await createUserShell('global:member');
+	owner = await createUserShell(GLOBAL_OWNER_ROLE);
+	member = await createUserShell(GLOBAL_MEMBER_ROLE);
 
 	authOwnerAgent = testServer.authAgentFor(owner);
 	authMemberAgent = testServer.authAgentFor(member);
-
-	config.set('license.serverUrl', MOCK_SERVER_URL);
-	config.set('license.autoRenewEnabled', true);
-	config.set('license.autoRenewOffset', MOCK_RENEW_OFFSET);
 });
 
 afterEach(async () => {
@@ -78,7 +71,7 @@ describe('POST /license/activate', () => {
 	});
 
 	test('errors out properly', async () => {
-		License.prototype.activate = jest.fn().mockImplementation(() => {
+		License.prototype.activate = vi.fn().mockImplementation(() => {
 			throw new Error('some fake error');
 		});
 
@@ -102,7 +95,8 @@ describe('POST /license/renew', () => {
 	});
 
 	test('errors out properly', async () => {
-		License.prototype.renew = jest.fn().mockImplementation(() => {
+		License.prototype.getPlanName = vi.fn().mockReturnValue('Enterprise');
+		License.prototype.renew = vi.fn().mockImplementation(() => {
 			throw new Error(GENERIC_ERROR_MESSAGE);
 		});
 
@@ -115,10 +109,14 @@ describe('POST /license/renew', () => {
 const DEFAULT_LICENSE_RESPONSE: { data: ILicenseReadResponse } = {
 	data: {
 		usage: {
-			executions: {
+			activeWorkflowTriggers: {
 				value: 0,
 				limit: -1,
 				warningThreshold: 0.8,
+			},
+			workflowsHavingEvaluations: {
+				value: 0,
+				limit: 0,
 			},
 		},
 		license: {
@@ -131,10 +129,14 @@ const DEFAULT_LICENSE_RESPONSE: { data: ILicenseReadResponse } = {
 const DEFAULT_POST_RESPONSE: { data: ILicensePostResponse } = {
 	data: {
 		usage: {
-			executions: {
+			activeWorkflowTriggers: {
 				value: 0,
 				limit: -1,
 				warningThreshold: 0.8,
+			},
+			workflowsHavingEvaluations: {
+				value: 0,
+				limit: 0,
 			},
 		},
 		license: {

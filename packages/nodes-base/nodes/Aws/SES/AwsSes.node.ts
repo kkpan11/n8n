@@ -1,4 +1,3 @@
-import qs from 'node:querystring';
 import type {
 	IExecuteFunctions,
 	IDataObject,
@@ -8,13 +7,15 @@ import type {
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeConnectionTypes, NodeOperationError, requestPath } from 'n8n-workflow';
+import qs from 'node:querystring';
 
 import { awsApiRequestSOAP, awsApiRequestSOAPAllItems } from './GenericFunctions';
+import { awsNodeAuthOptions, awsNodeCredentials } from '../utils';
 
-function setParameter(params: string[], base: string, values: string[]) {
+function setParameter(query: IDataObject, base: string, values: string[]) {
 	for (let i = 0; i < values.length; i++) {
-		params.push(`${base}.${i + 1}=${encodeURIComponent(values[i])}`);
+		query[`${base}.${i + 1}`] = values[i];
 	}
 }
 
@@ -27,18 +28,16 @@ export class AwsSes implements INodeType {
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description: 'Sends data to AWS SES',
+		schemaPath: 'Aws/SES',
 		defaults: {
 			name: 'AWS SES',
 		},
-		inputs: ['main'],
-		outputs: ['main'],
-		credentials: [
-			{
-				name: 'aws',
-				required: true,
-			},
-		],
+		usableAsTool: true,
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
+		credentials: awsNodeCredentials,
 		properties: [
+			awsNodeAuthOptions,
 			{
 				displayName: 'Resource',
 				name: 'resource',
@@ -459,7 +458,7 @@ export class AwsSes implements INodeType {
 				},
 				default: '',
 				description:
-					'The ARN of the template to use when sending this email. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+					'The ARN of the template to use when sending this email. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 			},
 			{
 				displayName: 'From Email',
@@ -797,7 +796,9 @@ export class AwsSes implements INodeType {
 					'ListTemplatesResponse.ListTemplatesResult.TemplatesMetadata.member',
 					'email',
 					'POST',
-					'/?Action=ListTemplates',
+					requestPath`/`,
+					undefined,
+					{ Action: 'ListTemplates' },
 				);
 
 				for (const template of templates) {
@@ -848,7 +849,7 @@ export class AwsSes implements INodeType {
 							this,
 							'email',
 							'POST',
-							'',
+							requestPath``,
 							qs.stringify({
 								Action: 'CreateCustomVerificationEmailTemplate',
 								FromEmailAddress: email,
@@ -868,14 +869,14 @@ export class AwsSes implements INodeType {
 
 						const params = [
 							'Action=DeleteCustomVerificationEmailTemplate',
-							`TemplateName=${templateName}`,
+							`TemplateName=${encodeURIComponent(templateName)}`,
 						];
 
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'',
+							requestPath``,
 							params.join('&'),
 						);
 
@@ -885,13 +886,14 @@ export class AwsSes implements INodeType {
 					if (operation === 'get') {
 						const templateName = this.getNodeParameter('templateName', i) as string;
 
-						const params = [`TemplateName=${templateName}`];
-
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'/?Action=GetCustomVerificationEmailTemplate&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							{ Action: 'GetCustomVerificationEmailTemplate', TemplateName: templateName },
 						);
 
 						responseData = responseData.GetCustomVerificationEmailTemplateResponse;
@@ -906,7 +908,9 @@ export class AwsSes implements INodeType {
 								'ListCustomVerificationEmailTemplatesResponse.ListCustomVerificationEmailTemplatesResult.CustomVerificationEmailTemplates.member',
 								'email',
 								'POST',
-								'/?Action=ListCustomVerificationEmailTemplates',
+								requestPath`/`,
+								undefined,
+								{ Action: 'ListCustomVerificationEmailTemplates' },
 							);
 						} else {
 							const limit = this.getNodeParameter('limit', i);
@@ -915,7 +919,10 @@ export class AwsSes implements INodeType {
 								this,
 								'email',
 								'GET',
-								`/?Action=ListCustomVerificationEmailTemplates&MaxResults=${limit}`,
+								requestPath`/`,
+								undefined,
+								undefined,
+								{ Action: 'ListCustomVerificationEmailTemplates', MaxResults: limit },
 							);
 
 							responseData =
@@ -926,7 +933,7 @@ export class AwsSes implements INodeType {
 					}
 
 					if (operation === 'send') {
-						const email = this.getNodeParameter('email', i) as string[];
+						const email = this.getNodeParameter('email', i) as string;
 
 						const templateName = this.getNodeParameter('templateName', i) as string;
 
@@ -934,19 +941,21 @@ export class AwsSes implements INodeType {
 
 						const params = [
 							'Action=SendCustomVerificationEmail',
-							`TemplateName=${templateName}`,
-							`EmailAddress=${email}`,
+							`TemplateName=${encodeURIComponent(templateName)}`,
+							`EmailAddress=${encodeURIComponent(email)}`,
 						];
 
 						if (additionalFields.configurationSetName) {
-							params.push(`ConfigurationSetName=${additionalFields.configurationSetName}`);
+							params.push(
+								`ConfigurationSetName=${encodeURIComponent(additionalFields.configurationSetName as string)}`,
+							);
 						}
 
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'',
+							requestPath``,
 							params.join('&'),
 						);
 
@@ -960,34 +969,42 @@ export class AwsSes implements INodeType {
 
 						const params = [
 							'Action=UpdateCustomVerificationEmailTemplate',
-							`TemplateName=${templateName}`,
+							`TemplateName=${encodeURIComponent(templateName)}`,
 						];
 
 						if (updateFields.FailureRedirectionURL) {
-							params.push(`FailureRedirectionURL=${updateFields.FailureRedirectionURL}`);
+							params.push(
+								`FailureRedirectionURL=${encodeURIComponent(updateFields.FailureRedirectionURL as string)}`,
+							);
 						}
 
 						if (updateFields.email) {
-							params.push(`FromEmailAddress=${updateFields.email}`);
+							params.push(`FromEmailAddress=${encodeURIComponent(updateFields.email as string)}`);
 						}
 
 						if (updateFields.successRedirectionURL) {
-							params.push(`SuccessRedirectionURL=${updateFields.successRedirectionURL}`);
+							params.push(
+								`SuccessRedirectionURL=${encodeURIComponent(updateFields.successRedirectionURL as string)}`,
+							);
 						}
 
 						if (updateFields.templateContent) {
-							params.push(`TemplateContent=${updateFields.templateContent}`);
+							params.push(
+								`TemplateContent=${encodeURIComponent(updateFields.templateContent as string)}`,
+							);
 						}
 
 						if (updateFields.templateSubject) {
-							params.push(`TemplateSubject=${updateFields.templateSubject}`);
+							params.push(
+								`TemplateSubject=${encodeURIComponent(updateFields.templateSubject as string)}`,
+							);
 						}
 
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'',
+							requestPath``,
 							params.join('&'),
 						);
 
@@ -1009,20 +1026,21 @@ export class AwsSes implements INodeType {
 
 						const additionalFields = this.getNodeParameter('additionalFields', i);
 
-						const params = [
-							`Message.Subject.Data=${encodeURIComponent(subject)}`,
-							`Source=${encodeURIComponent(fromEmail)}`,
-						];
+						const query: IDataObject = {
+							Action: 'SendEmail',
+							'Message.Subject.Data': subject,
+							Source: fromEmail,
+						};
 
 						if (isBodyHtml) {
-							params.push(`Message.Body.Html.Data=${encodeURIComponent(message)}`);
-							params.push('Message.Body.Html.Charset=UTF-8');
+							query['Message.Body.Html.Data'] = message;
+							query['Message.Body.Html.Charset'] = 'UTF-8';
 						} else {
-							params.push(`Message.Body.Text.Data=${encodeURIComponent(message)}`);
+							query['Message.Body.Text.Data'] = message;
 						}
 
 						if (toAddresses.length) {
-							setParameter(params, 'Destination.ToAddresses.member', toAddresses);
+							setParameter(query, 'Destination.ToAddresses.member', toAddresses);
 						} else {
 							throw new NodeOperationError(
 								this.getNode(),
@@ -1032,24 +1050,24 @@ export class AwsSes implements INodeType {
 						}
 
 						if (additionalFields.configurationSetName) {
-							params.push(`ConfigurationSetName=${additionalFields.configurationSetName}`);
+							query.ConfigurationSetName = additionalFields.configurationSetName;
 						}
 
 						if (additionalFields.returnPath) {
-							params.push(`ReturnPath=${additionalFields.returnPath}`);
+							query.ReturnPath = additionalFields.returnPath;
 						}
 
 						if (additionalFields.returnPathArn) {
-							params.push(`ReturnPathArn=${additionalFields.returnPathArn}`);
+							query.ReturnPathArn = additionalFields.returnPathArn;
 						}
 
 						if (additionalFields.sourceArn) {
-							params.push(`SourceArn=${additionalFields.sourceArn}`);
+							query.SourceArn = additionalFields.sourceArn;
 						}
 
 						if (additionalFields.replyToAddresses) {
 							setParameter(
-								params,
+								query,
 								'ReplyToAddresses.member',
 								additionalFields.replyToAddresses as string[],
 							);
@@ -1057,7 +1075,7 @@ export class AwsSes implements INodeType {
 
 						if (additionalFields.bccAddresses) {
 							setParameter(
-								params,
+								query,
 								'Destination.BccAddresses.member',
 								additionalFields.bccAddresses as string[],
 							);
@@ -1065,7 +1083,7 @@ export class AwsSes implements INodeType {
 
 						if (additionalFields.ccAddresses) {
 							setParameter(
-								params,
+								query,
 								'Destination.CcAddresses.member',
 								additionalFields.ccAddresses as string[],
 							);
@@ -1074,25 +1092,27 @@ export class AwsSes implements INodeType {
 							this,
 							'email',
 							'POST',
-							'/?Action=SendEmail&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							query,
 						);
 					}
 
 					if (operation === 'sendTemplate') {
 						const toAddresses = this.getNodeParameter('toAddresses', i) as string[];
-
 						const template = this.getNodeParameter('templateName', i) as string;
-
 						const fromEmail = this.getNodeParameter('fromEmail', i) as string;
-
 						const additionalFields = this.getNodeParameter('additionalFields', i);
-
 						const templateDataUi = this.getNodeParameter('templateDataUi', i) as IDataObject;
-
-						const params = [`Template=${template}`, `Source=${fromEmail}`];
+						const query: IDataObject = {
+							Action: 'SendTemplatedEmail',
+							Template: template,
+							Source: fromEmail,
+						};
 
 						if (toAddresses.length) {
-							setParameter(params, 'Destination.ToAddresses.member', toAddresses);
+							setParameter(query, 'Destination.ToAddresses.member', toAddresses);
 						} else {
 							throw new NodeOperationError(
 								this.getNode(),
@@ -1102,24 +1122,24 @@ export class AwsSes implements INodeType {
 						}
 
 						if (additionalFields.configurationSetName) {
-							params.push(`ConfigurationSetName=${additionalFields.configurationSetName}`);
+							query.ConfigurationSetName = additionalFields.configurationSetName;
 						}
 
 						if (additionalFields.returnPath) {
-							params.push(`ReturnPath=${additionalFields.returnPath}`);
+							query.ReturnPath = additionalFields.returnPath;
 						}
 
 						if (additionalFields.returnPathArn) {
-							params.push(`ReturnPathArn=${additionalFields.returnPathArn}`);
+							query.ReturnPathArn = additionalFields.returnPathArn;
 						}
 
 						if (additionalFields.sourceArn) {
-							params.push(`SourceArn=${additionalFields.sourceArn}`);
+							query.SourceArn = additionalFields.sourceArn;
 						}
 
 						if (additionalFields.replyToAddresses) {
 							setParameter(
-								params,
+								query,
 								'ReplyToAddresses.member',
 								additionalFields.replyToAddresses as string[],
 							);
@@ -1127,7 +1147,7 @@ export class AwsSes implements INodeType {
 
 						if (additionalFields.bccAddresses) {
 							setParameter(
-								params,
+								query,
 								'Destination.BccAddresses.member',
 								additionalFields.bccAddresses as string[],
 							);
@@ -1135,7 +1155,7 @@ export class AwsSes implements INodeType {
 
 						if (additionalFields.ccAddresses) {
 							setParameter(
-								params,
+								query,
 								'Destination.CcAddresses.member',
 								additionalFields.ccAddresses as string[],
 							);
@@ -1149,7 +1169,7 @@ export class AwsSes implements INodeType {
 									//@ts-ignore
 									templateData[templateDataValue.key] = templateDataValue.value;
 								}
-								params.push(`TemplateData=${JSON.stringify(templateData)}`);
+								query.TemplateData = JSON.stringify(templateData);
 							}
 						}
 
@@ -1157,7 +1177,10 @@ export class AwsSes implements INodeType {
 							this,
 							'email',
 							'POST',
-							'/?Action=SendTemplatedEmail&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							query,
 						);
 
 						responseData = responseData.SendTemplatedEmailResponse;
@@ -1174,21 +1197,25 @@ export class AwsSes implements INodeType {
 
 						const additionalFields = this.getNodeParameter('additionalFields', i);
 
-						const params = [
-							`Template.TemplateName=${templateName}`,
-							`Template.SubjectPart=${subjectPart}`,
-							`Template.HtmlPart=<h1>${htmlPart}</h1>`,
-						];
+						const query: IDataObject = {
+							Action: 'CreateTemplate',
+							'Template.TemplateName': templateName,
+							'Template.SubjectPart': subjectPart,
+							'Template.HtmlPart': htmlPart,
+						};
 
 						if (additionalFields.textPart) {
-							params.push(`Template.TextPart=${additionalFields.textPart}`);
+							query['Template.TextPart'] = additionalFields.textPart;
 						}
 
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'/?Action=CreateTemplate&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							query,
 						);
 
 						responseData = responseData.CreateTemplateResponse;
@@ -1197,13 +1224,14 @@ export class AwsSes implements INodeType {
 					if (operation === 'delete') {
 						const templateName = this.getNodeParameter('templateName', i) as string;
 
-						const params = [`TemplateName=${templateName}`];
-
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'/?Action=DeleteTemplate&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							{ Action: 'DeleteTemplate', TemplateName: templateName },
 						);
 
 						responseData = responseData.DeleteTemplateResponse;
@@ -1212,13 +1240,14 @@ export class AwsSes implements INodeType {
 					if (operation === 'get') {
 						const templateName = this.getNodeParameter('templateName', i) as string;
 
-						const params = [`TemplateName=${templateName}`];
-
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'/?Action=GetTemplate&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							{ Action: 'GetTemplate', TemplateName: templateName },
 						);
 
 						responseData = responseData.GetTemplateResponse;
@@ -1233,7 +1262,9 @@ export class AwsSes implements INodeType {
 								'ListTemplatesResponse.ListTemplatesResult.TemplatesMetadata.member',
 								'email',
 								'POST',
-								'/?Action=ListTemplates',
+								requestPath`/`,
+								undefined,
+								{ Action: 'ListTemplates' },
 							);
 						} else {
 							const limit = this.getNodeParameter('limit', i);
@@ -1242,7 +1273,10 @@ export class AwsSes implements INodeType {
 								this,
 								'email',
 								'GET',
-								`/?Action=ListTemplates&MaxItems=${limit}`,
+								requestPath`/`,
+								undefined,
+								undefined,
+								{ Action: 'ListTemplates', MaxItems: limit },
 							);
 
 							responseData =
@@ -1255,25 +1289,31 @@ export class AwsSes implements INodeType {
 
 						const updateFields = this.getNodeParameter('updateFields', i);
 
-						const params = [`Template.TemplateName=${templateName}`];
+						const query: IDataObject = {
+							Action: 'UpdateTemplate',
+							'Template.TemplateName': templateName,
+						};
 
 						if (updateFields.textPart) {
-							params.push(`Template.TextPart=${updateFields.textPart}`);
+							query['Template.TextPart'] = updateFields.textPart;
 						}
 
 						if (updateFields.subjectPart) {
-							params.push(`Template.SubjectPart=${updateFields.subjectPart}`);
+							query['Template.SubjectPart'] = updateFields.subjectPart;
 						}
 
 						if (updateFields.subjectPart) {
-							params.push(`Template.HtmlPart=${updateFields.htmlPart}`);
+							query['Template.HtmlPart'] = updateFields.htmlPart;
 						}
 
 						responseData = await awsApiRequestSOAP.call(
 							this,
 							'email',
 							'POST',
-							'/?Action=UpdateTemplate&' + params.join('&'),
+							requestPath`/`,
+							undefined,
+							undefined,
+							query,
 						);
 
 						responseData = responseData.UpdateTemplateResponse;
@@ -1285,7 +1325,7 @@ export class AwsSes implements INodeType {
 				);
 				returnData.push(...executionData);
 			} catch (error) {
-				if (this.continueOnFail(error)) {
+				if (this.continueOnFail()) {
 					const executionData = this.helpers.constructExecutionMetaData(
 						this.helpers.returnJsonArray({ error: error.message }),
 						{ itemData: { item: i } },

@@ -1,8 +1,7 @@
-import type { INode, JsonObject } from '@/Interfaces';
-import type { NodeOperationErrorOptions } from './node-api.error';
 import { NodeError } from './abstract/node.error';
-import { ApplicationError } from './application.error';
-import { OBFUSCATED_ERROR_MESSAGE } from '../Constants';
+import { OperationalError } from '@n8n/errors';
+import type { NodeOperationErrorOptions } from './node-api.error';
+import type { INode, JsonObject } from '../interfaces';
 
 /**
  * Class for instantiating an operational error, e.g. an invalid credentials error.
@@ -16,16 +15,17 @@ export class NodeOperationError extends NodeError {
 		options: NodeOperationErrorOptions = {},
 	) {
 		if (error instanceof NodeOperationError) {
+			if (options.failure) {
+				error.failure = options.failure;
+			}
 			return error;
 		}
 
-		let obfuscateErrorMessage = false;
-
 		if (typeof error === 'string') {
-			error = new Error(error);
-		} else if (!(error instanceof ApplicationError)) {
-			// this error was no processed by n8n, obfuscate error message
-			obfuscateErrorMessage = true;
+			// `OperationalError` keeps the former `'warning'` default level.
+			// `'fatal'` isn't an operational level; map it to `'error'` (both are reported).
+			const level = options.level === 'fatal' ? 'error' : (options.level ?? 'warning');
+			error = new OperationalError(error, { level });
 		}
 
 		super(node, error);
@@ -34,14 +34,19 @@ export class NodeOperationError extends NodeError {
 			error.messages.forEach((message) => this.addToMessages(message));
 		}
 
-		if (obfuscateErrorMessage) this.message = OBFUSCATED_ERROR_MESSAGE;
 		if (options.message) this.message = options.message;
-		if (options.level) this.level = options.level;
+		this.level = options.level ?? 'warning';
 		if (options.functionality) this.functionality = options.functionality;
 		if (options.type) this.type = options.type;
-		this.description = options.description;
+		if (options.failure) this.failure = options.failure;
+
+		if (options.description) this.description = options.description;
+		else if ('description' in error && typeof error.description === 'string')
+			this.description = error.description;
+
 		this.context.runIndex = options.runIndex;
 		this.context.itemIndex = options.itemIndex;
+		this.context.metadata = options.metadata;
 
 		if (this.message === this.description) {
 			this.description = undefined;

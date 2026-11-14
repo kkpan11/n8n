@@ -17,7 +17,7 @@ export const ollamaModel: INodeProperties = {
 	displayName: 'Model',
 	name: 'model',
 	type: 'options',
-	default: 'llama2',
+	default: 'llama3.2',
 	description:
 		'The model which will generate the completion. To download models, visit <a href="https://ollama.ai/library">Ollama Models Library</a>.',
 	typeOptions: {
@@ -70,6 +70,14 @@ export const ollamaOptions: INodeProperties = {
 	type: 'collection',
 	default: {},
 	options: [
+		{
+			displayName: 'Enable Thinking',
+			name: 'think',
+			type: 'boolean',
+			default: true,
+			description:
+				"Whether to enable (default) thinking mode for supported models. When enabled, the model's thinking process is separated from the output. When disabled, the model outputs content directly (only for supported models).",
+		},
 		{
 			displayName: 'Sampling Temperature',
 			name: 'temperature',

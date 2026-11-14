@@ -1,20 +1,25 @@
-/* eslint-disable n8n-nodes-base/node-dirname-against-convention */
+import { ChatGroq } from '@langchain/groq';
 import {
-	NodeConnectionType,
-	type IExecuteFunctions,
+	proxyFetch,
+	makeN8nLlmFailedAttemptHandler,
+	N8nLlmTracing,
+	getConnectionHintNoticeField,
+} from '@n8n/ai-utilities';
+import {
+	NodeConnectionTypes,
 	type INodeType,
 	type INodeTypeDescription,
+	type ISupplyDataFunctions,
 	type SupplyData,
 } from 'n8n-workflow';
 
-import { ChatGroq } from '@langchain/groq';
-import { getConnectionHintNoticeField } from '../../../utils/sharedFields';
-import { N8nLlmTracing } from '../N8nLlmTracing';
+import { getRequiredApiKey } from '@utils/helpers';
+import { MODEL_SELECTION_HINT } from '@utils/model-builder-hints';
 
 export class LmChatGroq implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Groq Chat Model',
-		// eslint-disable-next-line n8n-nodes-base/node-class-description-name-miscased
+
 		name: 'lmChatGroq',
 		icon: 'file:groq.svg',
 		group: ['transform'],
@@ -26,7 +31,8 @@ export class LmChatGroq implements INodeType {
 		codex: {
 			categories: ['AI'],
 			subcategories: {
-				AI: ['Language Models'],
+				AI: ['Language Models', 'Root Nodes'],
+				'Language Models': ['Chat Models (Recommended)'],
 			},
 			resources: {
 				primaryDocumentation: [
@@ -36,10 +42,10 @@ export class LmChatGroq implements INodeType {
 				],
 			},
 		},
-		// eslint-disable-next-line n8n-nodes-base/node-class-description-inputs-wrong-regular-node
+
 		inputs: [],
-		// eslint-disable-next-line n8n-nodes-base/node-class-description-outputs-wrong
-		outputs: [NodeConnectionType.AiLanguageModel],
+
+		outputs: [NodeConnectionTypes.AiLanguageModel],
 		outputNames: ['Model'],
 		credentials: [
 			{
@@ -51,7 +57,7 @@ export class LmChatGroq implements INodeType {
 			baseURL: 'https://api.groq.com/openai/v1',
 		},
 		properties: [
-			getConnectionHintNoticeField([NodeConnectionType.AiChain, NodeConnectionType.AiChain]),
+			getConnectionHintNoticeField([NodeConnectionTypes.AiChain, NodeConnectionTypes.AiChain]),
 			{
 				displayName: 'Model',
 				name: 'model',
@@ -98,6 +104,9 @@ export class LmChatGroq implements INodeType {
 				description:
 					'The model which will generate the completion. <a href="https://console.groq.com/docs/models">Learn more</a>.',
 				default: 'llama3-8b-8192',
+				builderHint: {
+					propertyHint: MODEL_SELECTION_HINT,
+				},
 			},
 			{
 				displayName: 'Options',
@@ -128,8 +137,9 @@ export class LmChatGroq implements INodeType {
 		],
 	};
 
-	async supplyData(this: IExecuteFunctions, itemIndex: number): Promise<SupplyData> {
+	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
 		const credentials = await this.getCredentials('groqApi');
+		const apiKey = getRequiredApiKey(this.getNode(), credentials.apiKey);
 
 		const modelName = this.getNodeParameter('model', itemIndex) as string;
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
@@ -137,12 +147,16 @@ export class LmChatGroq implements INodeType {
 			temperature: number;
 		};
 
+		const egressFilter = this.helpers.getSecureEgressFilter();
 		const model = new ChatGroq({
-			apiKey: credentials.apiKey as string,
-			modelName,
+			apiKey,
+			model: modelName,
 			maxTokens: options.maxTokensToSample,
 			temperature: options.temperature,
 			callbacks: [new N8nLlmTracing(this)],
+			fetch: async (input: RequestInfo | URL, init?: RequestInit) =>
+				await proxyFetch({ input, init, egressFilter }),
+			onFailedAttempt: makeN8nLlmFailedAttemptHandler(this),
 		});
 
 		return {

@@ -1,24 +1,30 @@
+import { Readability } from '@mozilla/readability';
+import * as cheerio from 'cheerio';
+import { convert } from 'html-to-text';
+import { JSDOM } from 'jsdom';
+import get from 'lodash/get';
+import set from 'lodash/set';
+import unset from 'lodash/unset';
+import { getOAuth2AdditionalParameters } from 'n8n-nodes-base/dist/nodes/HttpRequest/GenericFunctions';
 import type {
-	IExecuteFunctions,
 	IDataObject,
 	IHttpRequestOptions,
 	IRequestOptionsSimplified,
 	ExecutionError,
 	NodeApiError,
+	ISupplyDataFunctions,
+	ICredentialDataDecryptedObject,
 } from 'n8n-workflow';
-import { NodeConnectionType, NodeOperationError, jsonParse } from 'n8n-workflow';
+import {
+	assertCredentialAllowsUrl,
+	NodeConnectionTypes,
+	NodeOperationError,
+	jsonParse,
+} from 'n8n-workflow';
+import { z } from 'zod';
 
-import { getOAuth2AdditionalParameters } from 'n8n-nodes-base/dist/nodes/HttpRequest/GenericFunctions';
+import { logAiEvent, redactSecrets } from '@n8n/ai-utilities';
 
-import set from 'lodash/set';
-import get from 'lodash/get';
-import unset from 'lodash/unset';
-
-import cheerio from 'cheerio';
-import { convert } from 'html-to-text';
-
-import { Readability } from '@mozilla/readability';
-import { JSDOM } from 'jsdom';
 import type {
 	ParameterInputType,
 	ParametersValues,
@@ -27,8 +33,27 @@ import type {
 	SendIn,
 	ToolParameter,
 } from './interfaces';
+import type { DynamicZodObject } from '../../../types/zod.types';
 
-const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: number) => {
+// Enforce the credential's "Allowed HTTP Request Domains" restriction against the
+// request URL before the secret is attached, so a tool-controlled URL can't leak it.
+// The resulting allowlist is forwarded onto the options so the HTTP layer re-checks
+// every redirect hop too, not just the initial URL.
+const assertCredentialUrlAllowed = (
+	ctx: ISupplyDataFunctions,
+	credentials: ICredentialDataDecryptedObject | undefined,
+	options: IHttpRequestOptions,
+) => {
+	if (!credentials) return;
+	const allowedDomains = assertCredentialAllowsUrl({
+		node: ctx.getNode(),
+		credentialData: credentials,
+		url: options.url,
+	});
+	if (allowedDomains) options.allowedDomains = allowedDomains;
+};
+
+const genericCredentialRequest = async (ctx: ISupplyDataFunctions, itemIndex: number) => {
 	const genericType = ctx.getNodeParameter('genericAuthType', itemIndex) as string;
 
 	if (genericType === 'httpBasicAuth' || genericType === 'httpDigestAuth') {
@@ -36,6 +61,7 @@ const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: numbe
 		const sendImmediately = genericType === 'httpDigestAuth' ? false : undefined;
 
 		return async (options: IHttpRequestOptions) => {
+			assertCredentialUrlAllowed(ctx, basicAuth, options);
 			options.auth = {
 				username: basicAuth.user as string,
 				password: basicAuth.password as string,
@@ -45,11 +71,24 @@ const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: numbe
 		};
 	}
 
+	if (genericType === 'httpBearerAuth') {
+		const bearerAuth = await ctx.getCredentials('httpBearerAuth', itemIndex);
+
+		return async (options: IHttpRequestOptions) => {
+			assertCredentialUrlAllowed(ctx, bearerAuth, options);
+			if (!options.headers) options.headers = {};
+			options.headers.Authorization = `Bearer ${String(bearerAuth.token)}`;
+			return await ctx.helpers.httpRequest(options);
+		};
+	}
+
 	if (genericType === 'httpHeaderAuth') {
 		const headerAuth = await ctx.getCredentials('httpHeaderAuth', itemIndex);
 
 		return async (options: IHttpRequestOptions) => {
-			options.headers![headerAuth.name as string] = headerAuth.value;
+			assertCredentialUrlAllowed(ctx, headerAuth, options);
+			if (!options.headers) options.headers = {};
+			options.headers[headerAuth.name as string] = headerAuth.value;
 			return await ctx.helpers.httpRequest(options);
 		};
 	}
@@ -58,9 +97,8 @@ const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: numbe
 		const queryAuth = await ctx.getCredentials('httpQueryAuth', itemIndex);
 
 		return async (options: IHttpRequestOptions) => {
-			if (!options.qs) {
-				options.qs = {};
-			}
+			assertCredentialUrlAllowed(ctx, queryAuth, options);
+			if (!options.qs) options.qs = {};
 			options.qs[queryAuth.name as string] = queryAuth.value;
 			return await ctx.helpers.httpRequest(options);
 		};
@@ -70,6 +108,7 @@ const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: numbe
 		const customAuth = await ctx.getCredentials('httpCustomAuth', itemIndex);
 
 		return async (options: IHttpRequestOptions) => {
+			assertCredentialUrlAllowed(ctx, customAuth, options);
 			const auth = jsonParse<IRequestOptionsSimplified>((customAuth.json as string) || '{}', {
 				errorMessage: 'Invalid Custom Auth JSON',
 			});
@@ -86,15 +125,32 @@ const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: numbe
 		};
 	}
 
-	if (genericType === 'oAuth1Api') {
+	if (genericType === 'httpTemplatedCustomAuth') {
+		const templatedAuth = await ctx.getCredentials('httpTemplatedCustomAuth', itemIndex);
+
 		return async (options: IHttpRequestOptions) => {
+			assertCredentialUrlAllowed(ctx, templatedAuth, options);
+			return await ctx.helpers.httpRequestWithAuthentication.call(
+				ctx,
+				'httpTemplatedCustomAuth',
+				options,
+			);
+		};
+	}
+
+	if (genericType === 'oAuth1Api') {
+		const oAuth1 = await ctx.getCredentials('oAuth1Api', itemIndex);
+		return async (options: IHttpRequestOptions) => {
+			assertCredentialUrlAllowed(ctx, oAuth1, options);
 			return await ctx.helpers.requestOAuth1.call(ctx, 'oAuth1Api', options);
 		};
 	}
 
 	if (genericType === 'oAuth2Api') {
+		const oAuth2 = await ctx.getCredentials('oAuth2Api', itemIndex);
 		return async (options: IHttpRequestOptions) => {
-			return await ctx.helpers.requestOAuth2.call(ctx, 'oAuth1Api', options, {
+			assertCredentialUrlAllowed(ctx, oAuth2, options);
+			return await ctx.helpers.requestOAuth2.call(ctx, 'oAuth2Api', options, {
 				tokenType: 'Bearer',
 			});
 		};
@@ -105,23 +161,24 @@ const genericCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: numbe
 	});
 };
 
-const predefinedCredentialRequest = async (ctx: IExecuteFunctions, itemIndex: number) => {
+const predefinedCredentialRequest = async (ctx: ISupplyDataFunctions, itemIndex: number) => {
 	const predefinedType = ctx.getNodeParameter('nodeCredentialType', itemIndex) as string;
 	const additionalOptions = getOAuth2AdditionalParameters(predefinedType);
+	const credentials = await ctx.getCredentials(predefinedType, itemIndex);
 
 	return async (options: IHttpRequestOptions) => {
-		return await ctx.helpers.requestWithAuthentication.call(
+		assertCredentialUrlAllowed(ctx, credentials, options);
+		return await ctx.helpers.httpRequestWithAuthentication.call(
 			ctx,
 			predefinedType,
 			options,
 			additionalOptions && { oauth2: additionalOptions },
-			itemIndex,
 		);
 	};
 };
 
 export const configureHttpRequestFunction = async (
-	ctx: IExecuteFunctions,
+	ctx: ISupplyDataFunctions,
 	credentialsType: 'predefinedCredentialType' | 'genericCredentialType' | 'none',
 	itemIndex: number,
 ) => {
@@ -148,7 +205,77 @@ const defaultOptimizer = <T>(response: T) => {
 	return String(response);
 };
 
-const htmlOptimizer = (ctx: IExecuteFunctions, itemIndex: number, maxLength: number) => {
+/** Error payloads are appended to the tool output, so they must not flood the model's context. */
+const MAX_ERROR_BODY_LENGTH = 2000;
+
+type FailedRequest = {
+	error?: unknown;
+	response?: { status?: number; data?: unknown };
+	// A tool using a predefined credential goes through `httpRequestWithAuthentication`, which
+	// rejects with a `NodeApiError`. That has no `response`, and its `cause` is not retained, but
+	// it copies an object payload onto `context.data`.
+	context?: { data?: unknown };
+};
+
+/**
+ * Reads the status and payload a failed request came back with. The error is either the one the
+ * HTTP client rejected with, or a `NodeApiError` wrapping it. The current client reports the
+ * payload as `response.data`, the legacy one as `error`.
+ */
+const getFailedRequest = (error: unknown): { status?: number; body?: unknown } => {
+	for (const candidate of [error, (error as { cause?: unknown })?.cause]) {
+		const failed = candidate as FailedRequest | undefined;
+		const body = failed?.response?.data ?? failed?.error ?? failed?.context?.data;
+		const status = failed?.response?.status;
+
+		if (body !== undefined || status !== undefined) {
+			return { status, body };
+		}
+	}
+
+	return {};
+};
+
+/**
+ * Turns an error payload into something safe to hand to the model: skips empty and binary bodies,
+ * and never throws, since this runs while we are already handling a failed request.
+ */
+const serializeErrorBody = (body: unknown): string | undefined => {
+	if (body === undefined || body === null || body === '' || isBinary(body)) {
+		return undefined;
+	}
+
+	let serialized: string;
+
+	try {
+		serialized = defaultOptimizer(body);
+	} catch {
+		return undefined;
+	}
+
+	return serialized.trim() ? redactSecrets(serialized) : undefined;
+};
+
+function isBinary(data: unknown) {
+	// Check if data is a Buffer
+	if (Buffer.isBuffer(data)) {
+		return true;
+	}
+
+	// If data is a string, assume it's text unless it contains null characters.
+	if (typeof data === 'string') {
+		// If the string contains a null character, it's likely binary.
+		if (data.includes('\0')) {
+			return true;
+		}
+		return false;
+	}
+
+	// For any other type, assume it's not binary.
+	return false;
+}
+
+const htmlOptimizer = (ctx: ISupplyDataFunctions, itemIndex: number, maxLength: number) => {
 	const cssSelector = ctx.getNodeParameter('cssSelector', itemIndex, '') as string;
 	const onlyContent = ctx.getNodeParameter('onlyContent', itemIndex, false) as boolean;
 	let elementsToOmit: string[] = [];
@@ -175,6 +302,7 @@ const htmlOptimizer = (ctx: IExecuteFunctions, itemIndex: number, maxLength: num
 			);
 		}
 		const returnData: string[] = [];
+
 		const html = cheerio.load(response);
 		const htmlElements = html(cssSelector);
 
@@ -215,7 +343,7 @@ const htmlOptimizer = (ctx: IExecuteFunctions, itemIndex: number, maxLength: num
 	};
 };
 
-const textOptimizer = (ctx: IExecuteFunctions, itemIndex: number, maxLength: number) => {
+const textOptimizer = (ctx: ISupplyDataFunctions, itemIndex: number, maxLength: number) => {
 	return (response: string | IDataObject) => {
 		if (typeof response === 'object') {
 			try {
@@ -246,7 +374,7 @@ const textOptimizer = (ctx: IExecuteFunctions, itemIndex: number, maxLength: num
 	};
 };
 
-const jsonOptimizer = (ctx: IExecuteFunctions, itemIndex: number) => {
+const jsonOptimizer = (ctx: ISupplyDataFunctions, itemIndex: number) => {
 	return (response: string): string => {
 		let responseData: IDataObject | IDataObject[] | string = response;
 
@@ -325,7 +453,7 @@ const jsonOptimizer = (ctx: IExecuteFunctions, itemIndex: number) => {
 	};
 };
 
-export const configureResponseOptimizer = (ctx: IExecuteFunctions, itemIndex: number) => {
+export const configureResponseOptimizer = (ctx: ISupplyDataFunctions, itemIndex: number) => {
 	const optimizeResponse = ctx.getNodeParameter('optimizeResponse', itemIndex, false) as boolean;
 
 	if (optimizeResponse) {
@@ -355,7 +483,7 @@ export const configureResponseOptimizer = (ctx: IExecuteFunctions, itemIndex: nu
 };
 
 const extractPlaceholders = (text: string): string[] => {
-	const placeholder = /(\{[a-zA-Z0-9_]+\})/g;
+	const placeholder = /(\{[a-zA-Z0-9_-]+\})/g;
 	const returnData: string[] = [];
 
 	const matches = text.matchAll(placeholder);
@@ -378,7 +506,6 @@ export const extractParametersFromText = (
 	const parameters = extractPlaceholders(text);
 
 	if (parameters.length) {
-		// eslint-disable-next-line @typescript-eslint/no-use-before-define
 		const inputParameters = prepareParameters(
 			parameters.map((name) => ({
 				name,
@@ -470,7 +597,7 @@ const MODEL_INPUT_DESCRIPTION = {
 };
 
 export const updateParametersAndOptions = (options: {
-	ctx: IExecuteFunctions;
+	ctx: ISupplyDataFunctions;
 	itemIndex: number;
 	toolParameters: ToolParameter[];
 	placeholdersDefinitions: PlaceholderDefinition[];
@@ -559,7 +686,7 @@ export const prepareToolDescription = (
 };
 
 export const configureToolFunction = (
-	ctx: IExecuteFunctions,
+	ctx: ISupplyDataFunctions,
 	itemIndex: number,
 	toolParameters: ToolParameter[],
 	requestOptions: IHttpRequestOptions,
@@ -567,11 +694,14 @@ export const configureToolFunction = (
 	httpRequest: (options: IHttpRequestOptions) => Promise<any>,
 	optimizeResponse: (response: string) => string,
 ) => {
-	return async (query: string): Promise<string> => {
-		const { index } = ctx.addInputData(NodeConnectionType.AiTool, [[{ json: { query } }]]);
+	return async (query: string | IDataObject): Promise<string> => {
+		const { index } = ctx.addInputData(NodeConnectionTypes.AiTool, [[{ json: { query } }]]);
 
+		// Clone options and rawRequestOptions to avoid mutating the original objects
+		const options: IHttpRequestOptions | null = structuredClone(requestOptions);
+		const clonedRawRequestOptions: { [key: string]: string } = structuredClone(rawRequestOptions);
+		let fullResponse: any;
 		let response: string = '';
-		let options: IHttpRequestOptions | null = null;
 		let executionError: Error | undefined = undefined;
 
 		if (!toolParameters.length) {
@@ -582,18 +712,22 @@ export const configureToolFunction = (
 			if (query) {
 				let dataFromModel;
 
-				try {
-					dataFromModel = jsonParse<IDataObject>(query);
-				} catch (error) {
-					if (toolParameters.length === 1) {
-						dataFromModel = { [toolParameters[0].name]: query };
-					} else {
-						throw new NodeOperationError(
-							ctx.getNode(),
-							`Input is not a valid JSON: ${error.message}`,
-							{ itemIndex },
-						);
+				if (typeof query === 'string') {
+					try {
+						dataFromModel = jsonParse<IDataObject>(query);
+					} catch (error) {
+						if (toolParameters.length === 1) {
+							dataFromModel = { [toolParameters[0].name]: query };
+						} else {
+							throw new NodeOperationError(
+								ctx.getNode(),
+								`Input is not a valid JSON: ${error.message}`,
+								{ itemIndex },
+							);
+						}
 					}
+				} else {
+					dataFromModel = query;
 				}
 
 				for (const parameter of toolParameters) {
@@ -608,8 +742,6 @@ export const configureToolFunction = (
 						);
 					}
 				}
-
-				options = requestOptions;
 
 				for (const parameter of toolParameters) {
 					let argument = dataFromModel[parameter.name];
@@ -654,7 +786,7 @@ export const configureToolFunction = (
 							argument = String(argument);
 							if (
 								!argument.startsWith('"') &&
-								!rawRequestOptions[parameter.sendIn].includes(`"{${parameter.name}}"`)
+								!clonedRawRequestOptions[parameter.sendIn].includes(`"{${parameter.name}}"`)
 							) {
 								argument = `"${argument}"`;
 							}
@@ -664,10 +796,9 @@ export const configureToolFunction = (
 							argument = JSON.stringify(argument);
 						}
 
-						rawRequestOptions[parameter.sendIn] = rawRequestOptions[parameter.sendIn].replace(
-							`{${parameter.name}}`,
-							String(argument),
-						);
+						clonedRawRequestOptions[parameter.sendIn] = clonedRawRequestOptions[
+							parameter.sendIn
+						].replace(`{${parameter.name}}`, String(argument));
 						continue;
 					}
 
@@ -688,26 +819,16 @@ export const configureToolFunction = (
 					set(options, [parameter.sendIn, parameter.name], argument);
 				}
 
-				for (const [key, value] of Object.entries(rawRequestOptions)) {
+				for (const [key, value] of Object.entries(clonedRawRequestOptions)) {
 					if (value) {
 						let parsedValue;
 						try {
-							parsedValue = jsonParse<IDataObject>(value);
+							parsedValue = jsonParse<IDataObject>(value, { repairJSON: true });
 						} catch (error) {
-							let recoveredData = '';
-							try {
-								recoveredData = value
-									.replace(/'/g, '"') // Replace single quotes with double quotes
-									.replace(/(['"])?([a-zA-Z0-9_]+)(['"])?:/g, '"$2":') // Wrap keys in double quotes
-									.replace(/,\s*([\]}])/g, '$1') // Remove trailing commas from objects
-									.replace(/,+$/, ''); // Remove trailing comma
-								parsedValue = jsonParse<IDataObject>(recoveredData);
-							} catch (err) {
-								throw new NodeOperationError(
-									ctx.getNode(),
-									`Could not replace placeholders in ${key}: ${error.message}`,
-								);
-							}
+							throw new NodeOperationError(
+								ctx.getNode(),
+								`Could not replace placeholders in ${key}: ${error.message}`,
+							);
 						}
 						options[key as 'qs' | 'headers' | 'body'] = parsedValue;
 					}
@@ -743,10 +864,36 @@ export const configureToolFunction = (
 
 		if (options) {
 			try {
-				response = optimizeResponse(await httpRequest(options));
+				fullResponse = await httpRequest(options);
 			} catch (error) {
-				const httpCode = (error as NodeApiError).httpCode;
-				response = `${httpCode ? `HTTP ${httpCode} ` : ''}There was an error: "${error.message}"`;
+				const { status, body } = getFailedRequest(error);
+				const httpCode = (error as NodeApiError).httpCode ?? status;
+				// Some clients fold the response body into the message, so it needs the same masking
+				// as the body itself — and the dedupe check below only holds if both sides are redacted.
+				const message = redactSecrets(error.message);
+				response = `${httpCode ? `HTTP ${httpCode} ` : ''}There was an error: "${message}"`;
+
+				// The API's own error payload is what tells the model why the call was rejected. Without
+				// it the model only sees a status code and tends to invent a reason for the failure.
+				const errorBody = serializeErrorBody(body);
+				if (errorBody !== undefined && !message.includes(errorBody)) {
+					response += `\nResponse body: ${errorBody.slice(0, MAX_ERROR_BODY_LENGTH)}${
+						errorBody.length > MAX_ERROR_BODY_LENGTH ? '... [truncated]' : ''
+					}`;
+				}
+			}
+
+			if (!response) {
+				try {
+					// Check if the response is binary data
+					if (fullResponse.body && isBinary(fullResponse.body)) {
+						throw new NodeOperationError(ctx.getNode(), 'Binary data is not supported');
+					}
+
+					response = optimizeResponse(fullResponse.body ?? fullResponse);
+				} catch (error) {
+					response = `There was an error: "${error.message}"`;
+				}
 			}
 		}
 
@@ -758,11 +905,48 @@ export const configureToolFunction = (
 		}
 
 		if (executionError) {
-			void ctx.addOutputData(NodeConnectionType.AiTool, index, executionError as ExecutionError);
+			void ctx.addOutputData(NodeConnectionTypes.AiTool, index, executionError as ExecutionError);
 		} else {
-			void ctx.addOutputData(NodeConnectionType.AiTool, index, [[{ json: { response } }]]);
+			void ctx.addOutputData(NodeConnectionTypes.AiTool, index, [[{ json: { response } }]]);
 		}
+
+		logAiEvent(ctx, 'ai-tool-called', { query, response });
 
 		return response;
 	};
 };
+
+function makeParameterZodSchema(parameter: ToolParameter) {
+	let schema: z.ZodTypeAny;
+
+	if (parameter.type === 'string') {
+		schema = z.string();
+	} else if (parameter.type === 'number') {
+		schema = z.number();
+	} else if (parameter.type === 'boolean') {
+		schema = z.boolean();
+	} else if (parameter.type === 'json') {
+		schema = z.record(z.any());
+	} else {
+		schema = z.string();
+	}
+
+	if (!parameter.required) {
+		schema = schema.optional();
+	}
+
+	if (parameter.description) {
+		schema = schema.describe(parameter.description);
+	}
+
+	return schema;
+}
+
+export function makeToolInputSchema(parameters: ToolParameter[]): DynamicZodObject {
+	const schemaEntries = parameters.map((parameter) => [
+		parameter.name,
+		makeParameterZodSchema(parameter),
+	]);
+
+	return z.object(Object.fromEntries(schemaEntries));
+}

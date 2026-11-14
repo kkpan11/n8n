@@ -1,4 +1,3 @@
-/* eslint-disable n8n-nodes-base/node-filename-against-convention */
 import type {
 	IExecuteFunctions,
 	IDataObject,
@@ -7,13 +6,14 @@ import type {
 	INodeTypeDescription,
 	INodeTypeBaseDescription,
 	IHttpRequestMethods,
+	RequestPath,
 } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeConnectionTypes, NodeOperationError, requestPath } from 'n8n-workflow';
 
-import { oldVersionNotice } from '../../../utils/descriptions';
-import { generatePairedItemData } from '../../../utils/utilities';
 import type { IRecord } from './GenericFunctions';
 import { apiRequest, apiRequestAllItems, downloadRecordAttachments } from './GenericFunctions';
+import { oldVersionNotice } from '../../../utils/descriptions';
+import { generatePairedItemData } from '../../../utils/utilities';
 
 const versionDescription: INodeTypeDescription = {
 	displayName: 'Airtable',
@@ -25,8 +25,8 @@ const versionDescription: INodeTypeDescription = {
 	defaults: {
 		name: 'Airtable',
 	},
-	inputs: ['main'],
-	outputs: ['main'],
+	inputs: [NodeConnectionTypes.Main],
+	outputs: [NodeConnectionTypes.Main],
 	credentials: [
 		{
 			name: 'airtableApi',
@@ -347,7 +347,7 @@ const versionDescription: INodeTypeDescription = {
 			},
 			default: {},
 			description: 'Additional options which decide which records should be returned',
-			placeholder: 'Add Option',
+			placeholder: 'Add option',
 			options: [
 				{
 					displayName: 'Fields',
@@ -502,7 +502,7 @@ const versionDescription: INodeTypeDescription = {
 			displayName: 'Options',
 			name: 'options',
 			type: 'collection',
-			placeholder: 'Add Option',
+			placeholder: 'Add option',
 			displayOptions: {
 				show: {
 					operation: ['append', 'delete', 'update'],
@@ -581,14 +581,12 @@ export class AirtableV1 implements INodeType {
 			extractValue: true,
 		}) as string;
 
-		const table = encodeURI(
-			this.getNodeParameter('table', 0, undefined, {
-				extractValue: true,
-			}) as string,
-		);
+		const table = this.getNodeParameter('table', 0, undefined, {
+			extractValue: true,
+		}) as string;
 
 		let returnAll = false;
-		let endpoint = '';
+		let endpoint: RequestPath;
 		let requestMethod: IHttpRequestMethods;
 
 		const body: IDataObject = {};
@@ -600,7 +598,7 @@ export class AirtableV1 implements INodeType {
 			// ----------------------------------
 
 			requestMethod = 'POST';
-			endpoint = `${application}/${table}`;
+			endpoint = requestPath`${application}/${table}`;
 
 			let addAllFields: boolean;
 			let fields: string[];
@@ -653,7 +651,7 @@ export class AirtableV1 implements INodeType {
 						rows.length = 0;
 					}
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						returnData.push({ json: { error: error.message } });
 						continue;
 					}
@@ -674,7 +672,7 @@ export class AirtableV1 implements INodeType {
 					rows.push(id);
 
 					if (rows.length === bulkSize || i === items.length - 1) {
-						endpoint = `${application}/${table}`;
+						endpoint = requestPath`${application}/${table}`;
 
 						// Make one request after another. This is slower but makes
 						// sure that we do not run into the rate limit they have in
@@ -696,7 +694,7 @@ export class AirtableV1 implements INodeType {
 						rows.length = 0;
 					}
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						returnData.push({ json: { error: error.message } });
 						continue;
 					}
@@ -709,7 +707,7 @@ export class AirtableV1 implements INodeType {
 			// ----------------------------------
 			try {
 				requestMethod = 'GET';
-				endpoint = `${application}/${table}`;
+				endpoint = requestPath`${application}/${table}`;
 
 				returnAll = this.getNodeParameter('returnAll', 0);
 
@@ -757,7 +755,7 @@ export class AirtableV1 implements INodeType {
 					}),
 				];
 			} catch (error) {
-				if (this.continueOnFail(error)) {
+				if (this.continueOnFail()) {
 					returnData.push({ json: { error: error.message } });
 				} else {
 					throw error;
@@ -774,7 +772,7 @@ export class AirtableV1 implements INodeType {
 			for (let i = 0; i < items.length; i++) {
 				id = this.getNodeParameter('id', i) as string;
 
-				endpoint = `${application}/${table}/${id}`;
+				endpoint = requestPath`${application}/${table}/${id}`;
 
 				// Make one request after another. This is slower but makes
 				// sure that we do not run into the rate limit they have in
@@ -792,7 +790,7 @@ export class AirtableV1 implements INodeType {
 
 					returnData.push(...executionData);
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						returnData.push({ json: { error: error.message } });
 						continue;
 					}
@@ -856,7 +854,7 @@ export class AirtableV1 implements INodeType {
 					rows.push(row);
 
 					if (rows.length === bulkSize || i === items.length - 1) {
-						endpoint = `${application}/${table}`;
+						endpoint = requestPath`${application}/${table}`;
 
 						// Make one request after another. This is slower but makes
 						// sure that we do not run into the rate limit they have in
@@ -880,7 +878,7 @@ export class AirtableV1 implements INodeType {
 						rows.length = 0;
 					}
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						returnData.push({ json: { error: error.message } });
 						continue;
 					}

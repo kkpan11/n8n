@@ -1,6 +1,7 @@
-import { isTraversableObject, jsonParse } from '../../utils';
-import type { IDataObject, INode, JsonObject } from '@/Interfaces';
 import { ExecutionBaseError } from './execution-base.error';
+import type { Failure } from '../failure';
+import type { IDataObject, INode, JsonObject } from '../../interfaces';
+import { isTraversableObject, jsonParse } from '../../utils';
 
 /**
  * Descriptive messages for common errors.
@@ -37,6 +38,9 @@ const COMMON_ERRORS: IDataObject = {
 export abstract class NodeError extends ExecutionBaseError {
 	messages: string[] = [];
 
+	/** Why the operation failed, when the node declared it. */
+	failure?: Failure;
+
 	constructor(
 		readonly node: INode,
 		error: Error | JsonObject,
@@ -48,6 +52,7 @@ export abstract class NodeError extends ExecutionBaseError {
 
 		if (error instanceof NodeError) {
 			this.tags.reWrapped = true;
+			this.failure = error.failure;
 		}
 	}
 
@@ -79,7 +84,11 @@ export abstract class NodeError extends ExecutionBaseError {
 		jsonError: JsonObject,
 		potentialKeys: string[],
 		traversalKeys: string[] = [],
+		ancestors = new Set<JsonObject>(),
 	): string | null {
+		if (ancestors.has(jsonError)) return null;
+		const seen = new Set(ancestors).add(jsonError);
+
 		for (const key of potentialKeys) {
 			let value = jsonError[key];
 			if (value) {
@@ -94,12 +103,12 @@ export abstract class NodeError extends ExecutionBaseError {
 				if (typeof value === 'number') return value.toString();
 				if (Array.isArray(value)) {
 					const resolvedErrors: string[] = value
-						// eslint-disable-next-line @typescript-eslint/no-shadow
+
 						.map((jsonError) => {
 							if (typeof jsonError === 'string') return jsonError;
 							if (typeof jsonError === 'number') return jsonError.toString();
 							if (isTraversableObject(jsonError)) {
-								return this.findProperty(jsonError, potentialKeys);
+								return this.findProperty(jsonError, potentialKeys, [], seen);
 							}
 							return null;
 						})
@@ -111,7 +120,7 @@ export abstract class NodeError extends ExecutionBaseError {
 					return resolvedErrors.join(' | ');
 				}
 				if (isTraversableObject(value)) {
-					const property = this.findProperty(value, potentialKeys);
+					const property = this.findProperty(value, potentialKeys, [], seen);
 					if (property) {
 						return property;
 					}
@@ -122,7 +131,7 @@ export abstract class NodeError extends ExecutionBaseError {
 		for (const key of traversalKeys) {
 			const value = jsonError[key];
 			if (isTraversableObject(value)) {
-				const property = this.findProperty(value, potentialKeys, traversalKeys);
+				const property = this.findProperty(value, potentialKeys, traversalKeys, seen);
 				if (property) {
 					return property;
 				}
@@ -167,7 +176,7 @@ export abstract class NodeError extends ExecutionBaseError {
 		}
 
 		// if code is provided and it is in the list of common errors set the message and return early
-		if (code && COMMON_ERRORS[code.toUpperCase()]) {
+		if (code && typeof code === 'string' && COMMON_ERRORS[code.toUpperCase()]) {
 			newMessage = COMMON_ERRORS[code] as string;
 			messages.push(message);
 			return [newMessage, messages];

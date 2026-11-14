@@ -1,27 +1,30 @@
 import type { IResult } from 'mssql';
-import type {
-	IExecuteFunctions,
-	ICredentialDataDecryptedObject,
-	ICredentialsDecrypted,
-	ICredentialTestFunctions,
-	IDataObject,
-	INodeCredentialTestResult,
-	INodeExecutionData,
-	INodeType,
-	INodeTypeDescription,
+import {
+	type IExecuteFunctions,
+	type ICredentialDataDecryptedObject,
+	type ICredentialsDecrypted,
+	type ICredentialTestFunctions,
+	type IDataObject,
+	type INodeCredentialTestResult,
+	type INodeExecutionData,
+	type INodeType,
+	type INodeTypeDescription,
+	NodeConnectionTypes,
 } from 'n8n-workflow';
 
-import type { ITables } from './interfaces';
+import { flatten, generatePairedItemData, getResolvables } from '@utils/utilities';
+import { resolveSqlQueryParameters } from '@utils/sql-query-parameters';
 
 import {
+	bindQueryParameters,
 	configurePool,
 	createTableStruct,
 	deleteOperation,
+	executeSqlQueryAndPrepareResults,
 	insertOperation,
 	updateOperation,
 } from './GenericFunctions';
-
-import { flatten, generatePairedItemData, getResolvables } from '@utils/utilities';
+import type { ITables } from './interfaces';
 
 export class MicrosoftSql implements INodeType {
 	description: INodeTypeDescription = {
@@ -29,13 +32,14 @@ export class MicrosoftSql implements INodeType {
 		name: 'microsoftSql',
 		icon: 'file:mssql.svg',
 		group: ['input'],
-		version: [1, 1.1],
+		version: [1, 1.1, 1.2],
 		description: 'Get, add and update data in Microsoft SQL',
 		defaults: {
 			name: 'Microsoft SQL',
 		},
-		inputs: ['main'],
-		outputs: ['main'],
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
+		usableAsTool: true,
 		parameterPane: 'wide',
 		credentials: [
 			{
@@ -97,10 +101,35 @@ export class MicrosoftSql implements INodeType {
 					},
 				},
 				default: '',
-
-				placeholder: 'SELECT id, name FROM product WHERE id < 40',
+				placeholder: 'SELECT id, name FROM product WHERE quantity > $1 AND price <= $2',
 				required: true,
-				description: 'The SQL query to execute',
+				description:
+					"The SQL query to execute. You can use n8n expressions and $1, $2, $3, etc to refer to the 'Query Parameters' set in options below.",
+				hint: 'Consider using query parameters to prevent SQL injection attacks. Add them in the options below',
+			},
+			{
+				displayName: 'Options',
+				name: 'options',
+				type: 'collection',
+				placeholder: 'Add option',
+				default: {},
+				displayOptions: {
+					show: {
+						operation: ['executeQuery'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Query Parameters',
+						name: 'queryReplacement',
+						type: 'string',
+						default: '',
+						placeholder: 'e.g. value1,value2,value3',
+						description:
+							'Comma-separated list of values to use as query parameters. Reference them in the query as $1, $2, $3, etc. You can drag values from the input panel on the left.',
+						hint: 'Comma-separated list of values: reference them in your query as $1, $2, $3…',
+					},
+				],
 			},
 
 			// ----------------------------------
@@ -245,13 +274,24 @@ export class MicrosoftSql implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const credentials = await this.getCredentials('microsoftSql');
 
-		const pool = configurePool(credentials);
-		await pool.connect();
-
 		let responseData: IDataObject | IDataObject[] = [];
 		let returnData: INodeExecutionData[] = [];
-
 		const items = this.getInputData();
+		const pairedItem = generatePairedItemData(items.length);
+
+		const pool = configurePool(credentials);
+		try {
+			await pool.connect();
+		} catch (error) {
+			void pool.close();
+
+			if (this.continueOnFail()) {
+				return [[{ json: { error: error.message }, pairedItem }]];
+			} else {
+				throw error;
+			}
+		}
+
 		const operation = this.getNodeParameter('operation', 0);
 		const nodeVersion = this.getNode().typeVersion;
 
@@ -263,22 +303,23 @@ export class MicrosoftSql implements INodeType {
 					for (const resolvable of getResolvables(rawQuery)) {
 						rawQuery = rawQuery.replace(
 							resolvable,
-							this.evaluateExpression(resolvable, i) as string,
+							() => this.evaluateExpression(resolvable, i) as string,
 						);
 					}
 
-					const { recordsets }: IResult<any[]> = await pool.request().query(rawQuery);
+					const queryValues = resolveSqlQueryParameters.call(this, i);
 
-					const result: IDataObject[] = recordsets.length > 1 ? flatten(recordsets) : recordsets[0];
-
-					for (const entry of result) {
-						returnData.push({
-							json: entry,
-							pairedItem: [{ item: i }],
-						});
-					}
+					const results = await executeSqlQueryAndPrepareResults.call(
+						this,
+						pool,
+						rawQuery,
+						i,
+						queryValues,
+						this.getNode().typeVersion,
+					);
+					returnData = returnData.concat(results);
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						returnData.push({
 							json: { error: error.message },
 							pairedItem: [{ item: i }],
@@ -298,10 +339,17 @@ export class MicrosoftSql implements INodeType {
 				let rawQuery = this.getNodeParameter('query', 0) as string;
 
 				for (const resolvable of getResolvables(rawQuery)) {
-					rawQuery = rawQuery.replace(resolvable, this.evaluateExpression(resolvable, 0) as string);
+					rawQuery = rawQuery.replace(
+						resolvable,
+						() => this.evaluateExpression(resolvable, 0) as string,
+					);
 				}
 
-				const { recordsets }: IResult<any[]> = await pool.request().query(rawQuery);
+				const queryValues = resolveSqlQueryParameters.call(this, 0);
+
+				const request = pool.request();
+				const processedQuery = bindQueryParameters(this.getNode(), request, rawQuery, queryValues);
+				const { recordsets }: IResult<any[]> = await request.query(processedQuery);
 
 				const result = recordsets.length > 1 ? flatten(recordsets) : recordsets[0];
 
@@ -337,15 +385,16 @@ export class MicrosoftSql implements INodeType {
 				const tables = items.reduce((acc, item, index) => {
 					const table = this.getNodeParameter('table', index) as string;
 					const deleteKey = this.getNodeParameter('deleteKey', index) as string;
-					if (acc[table] === undefined) {
-						acc[table] = {};
+
+					if (!Object.hasOwn(acc, table)) {
+						acc[table] = Object.create(null);
 					}
-					if (acc[table][deleteKey] === undefined) {
+					if (!Object.hasOwn(acc[table], deleteKey)) {
 						acc[table][deleteKey] = [];
 					}
-					acc[table][deleteKey].push(item);
+					(acc[table][deleteKey] as INodeExecutionData[]).push(item);
 					return acc;
-				}, {} as ITables);
+				}, Object.create(null) as ITables);
 
 				responseData = await deleteOperation(tables, pool);
 			}
@@ -357,7 +406,7 @@ export class MicrosoftSql implements INodeType {
 				{ itemData },
 			);
 		} catch (error) {
-			if (this.continueOnFail(error)) {
+			if (this.continueOnFail()) {
 				responseData = items;
 			} else {
 				await pool.close();

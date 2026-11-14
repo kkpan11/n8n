@@ -4,6 +4,8 @@ import type {
 	INodeExecutionData,
 	INodeProperties,
 } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
+
 import { updateDisplayOptions } from '../../../../../utils/utilities';
 import {
 	createSimplifyFunction,
@@ -21,7 +23,7 @@ const properties: INodeProperties[] = [
 		displayName: 'Options',
 		name: 'options',
 		type: 'collection',
-		placeholder: 'Add Option',
+		placeholder: 'Add option',
 		default: {},
 		options: [simplifyBoolean],
 	},
@@ -66,7 +68,7 @@ export async function execute(
 			let response = await discordApiRequest.call(
 				this,
 				'GET',
-				`/channels/${channelId}/messages/${messageId}`,
+				requestPath`/channels/${channelId}/messages/${messageId}`,
 			);
 
 			const simplify = this.getNodeParameter('options.simplify', i, false) as boolean;
@@ -84,7 +86,7 @@ export async function execute(
 		} catch (error) {
 			const err = parseDiscordError.call(this, error, i);
 
-			if (this.continueOnFail(error)) {
+			if (this.continueOnFail()) {
 				returnData.push(...prepareErrorData.call(this, err, i));
 				continue;
 			}

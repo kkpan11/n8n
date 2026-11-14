@@ -24,7 +24,7 @@ export const taskOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'POST',
-						url: '=/contacts/{{$parameter.contactId}}/tasks/',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}/tasks/',
 					},
 					output: {
 						postReceive: [taskPostReceiceAction],
@@ -38,7 +38,7 @@ export const taskOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'DELETE',
-						url: '=/contacts/{{$parameter.contactId}}/tasks/{{$parameter.taskId}}/',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}/tasks/{{toPathSegment($parameter.taskId)}}/',
 					},
 					output: {
 						postReceive: [
@@ -59,7 +59,7 @@ export const taskOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'GET',
-						url: '=/contacts/{{$parameter.contactId}}/tasks/{{$parameter.taskId}}/',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}/tasks/{{toPathSegment($parameter.taskId)}}/',
 					},
 					output: {
 						postReceive: [taskPostReceiceAction],
@@ -73,7 +73,7 @@ export const taskOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'GET',
-						url: '=/contacts/{{$parameter.contactId}}/tasks/',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}/tasks/',
 					},
 					output: {
 						postReceive: [
@@ -95,7 +95,7 @@ export const taskOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'PUT',
-						url: '=/contacts/{{$parameter.contactId}}/tasks/{{$parameter.taskId}}/',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}/tasks/{{toPathSegment($parameter.taskId)}}/',
 					},
 					send: {
 						preSend: [taskUpdatePreSendAction],
@@ -129,7 +129,7 @@ const createProperties: INodeProperties[] = [
 		default: '',
 		required: true,
 		description:
-			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 	},
 	{
 		displayName: 'Title',
@@ -209,7 +209,7 @@ const createProperties: INodeProperties[] = [
 				type: 'options',
 				default: '',
 				description:
-					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>',
+					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 				typeOptions: {
 					loadOptionsMethod: 'getUsers',
 				},
@@ -254,7 +254,7 @@ const deleteProperties: INodeProperties[] = [
 		default: '',
 		required: true,
 		description:
-			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 	},
 	{
 		displayName: 'Task ID',
@@ -289,7 +289,7 @@ const getProperties: INodeProperties[] = [
 		default: '',
 		required: true,
 		description:
-			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 	},
 	{
 		displayName: 'Task ID',
@@ -324,7 +324,7 @@ const getAllProperties: INodeProperties[] = [
 		default: '',
 		required: true,
 		description:
-			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 	},
 	{
 		displayName: 'Return All',
@@ -383,7 +383,7 @@ const updateProperties: INodeProperties[] = [
 		default: '',
 		required: true,
 		description:
-			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+			'Contact the task belongs to. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 	},
 	{
 		displayName: 'Task ID',
@@ -418,7 +418,7 @@ const updateProperties: INodeProperties[] = [
 				type: 'options',
 				default: '',
 				description:
-					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>',
+					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 				typeOptions: {
 					loadOptionsMethod: 'getUsers',
 				},

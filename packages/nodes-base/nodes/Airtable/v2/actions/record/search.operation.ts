@@ -4,10 +4,12 @@ import type {
 	INodeProperties,
 	IExecuteFunctions,
 } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
+
 import { generatePairedItemData, updateDisplayOptions } from '../../../../../utils/utilities';
-import { apiRequest, apiRequestAllItems, downloadRecordAttachments } from '../../transport';
 import type { IRecord } from '../../helpers/interfaces';
-import { flattenOutput } from '../../helpers/utils';
+import { legacyFlattenOutput } from '../../helpers/utils';
+import { apiRequest, apiRequestAllItems, downloadRecordAttachments } from '../../transport';
 import { viewRLC } from '../common.descriptions';
 
 const properties: INodeProperties[] = [
@@ -50,7 +52,7 @@ const properties: INodeProperties[] = [
 		type: 'collection',
 		default: {},
 		description: 'Additional options which decide which records should be returned',
-		placeholder: 'Add Option',
+		placeholder: 'Add option',
 		options: [
 			{
 				// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-multi-options
@@ -107,7 +109,7 @@ const properties: INodeProperties[] = [
 						},
 						default: '',
 						description:
-							'Name of the field to sort on. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
+							'Name of the field to sort on. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 					},
 					{
 						displayName: 'Direction',
@@ -152,7 +154,7 @@ export async function execute(
 	const returnData: INodeExecutionData[] = [];
 	const nodeVersion = this.getNode().typeVersion;
 
-	const endpoint = `${base}/${table}`;
+	const endpoint = requestPath`${base}/${table}`;
 
 	let itemsLength = items.length ? 1 : 0;
 	let fallbackPairedItems;
@@ -209,14 +211,19 @@ export async function execute(
 					options.downloadFields as string[],
 					fallbackPairedItems || [{ item: i }],
 				);
-				returnData.push(...itemWithAttachments);
+				returnData.push(
+					...itemWithAttachments.map((item) => ({
+						...item,
+						json: legacyFlattenOutput(item.json, nodeVersion),
+					})),
+				);
 				continue;
 			}
 
 			let records = responseData.records;
 
 			records = (records as IDataObject[]).map((record) => ({
-				json: flattenOutput(record),
+				json: legacyFlattenOutput(record, nodeVersion),
 			})) as INodeExecutionData[];
 
 			const itemData = fallbackPairedItems || [{ item: i }];
@@ -227,7 +234,7 @@ export async function execute(
 
 			returnData.push(...executionData);
 		} catch (error) {
-			if (this.continueOnFail(error)) {
+			if (this.continueOnFail()) {
 				returnData.push({ json: { message: error.message, error }, pairedItem: { item: i } });
 				continue;
 			} else {

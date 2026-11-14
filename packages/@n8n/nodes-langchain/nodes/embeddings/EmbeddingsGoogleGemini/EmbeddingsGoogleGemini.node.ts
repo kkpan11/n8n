@@ -1,15 +1,15 @@
-/* eslint-disable n8n-nodes-base/node-dirname-against-convention */
+import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import {
-	NodeConnectionType,
-	type IExecuteFunctions,
+	NodeConnectionTypes,
 	type INodeType,
 	type INodeTypeDescription,
+	type ISupplyDataFunctions,
 	type SupplyData,
 } from 'n8n-workflow';
-import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 
-import { logWrapper } from '../../../utils/logWrapper';
-import { getConnectionHintNoticeField } from '../../../utils/sharedFields';
+import { logWrapper, getConnectionHintNoticeField, proxyFetch } from '@n8n/ai-utilities';
+
+import { getRequiredApiKey } from '@utils/helpers';
 
 export class EmbeddingsGoogleGemini implements INodeType {
 	description: INodeTypeDescription = {
@@ -45,13 +45,13 @@ export class EmbeddingsGoogleGemini implements INodeType {
 				],
 			},
 		},
-		// eslint-disable-next-line n8n-nodes-base/node-class-description-inputs-wrong-regular-node
+
 		inputs: [],
-		// eslint-disable-next-line n8n-nodes-base/node-class-description-outputs-wrong
-		outputs: [NodeConnectionType.AiEmbedding],
+
+		outputs: [NodeConnectionTypes.AiEmbedding],
 		outputNames: ['Embeddings'],
 		properties: [
-			getConnectionHintNoticeField([NodeConnectionType.AiVectorStore]),
+			getConnectionHintNoticeField([NodeConnectionTypes.AiVectorStore]),
 			{
 				displayName:
 					'Each model is using different dimensional density for embeddings. Please make sure to use the same dimensionality for your vector store. The default model is using 768-dimensional embeddings.',
@@ -111,22 +111,26 @@ export class EmbeddingsGoogleGemini implements INodeType {
 						property: 'model',
 					},
 				},
-				default: 'textembedding-gecko-multilingual@latest',
+				default: 'models/gemini-embedding-001',
 			},
 		],
 	};
 
-	async supplyData(this: IExecuteFunctions, itemIndex: number): Promise<SupplyData> {
-		this.logger.verbose('Supply data for embeddings Google Gemini');
+	async supplyData(this: ISupplyDataFunctions, itemIndex: number): Promise<SupplyData> {
+		this.logger.debug('Supply data for embeddings Google Gemini');
 		const modelName = this.getNodeParameter(
 			'modelName',
 			itemIndex,
-			'textembedding-gecko-multilingual@latest',
+			'models/gemini-embedding-001',
 		) as string;
 		const credentials = await this.getCredentials('googlePalmApi');
+		const egressFilter = this.helpers.getSecureEgressFilter();
 		const embeddings = new GoogleGenerativeAIEmbeddings({
-			apiKey: credentials.apiKey as string,
-			modelName,
+			apiKey: getRequiredApiKey(this.getNode(), credentials.apiKey),
+			baseUrl: credentials.host as string,
+			fetch: async (input: RequestInfo | URL, init?: RequestInit) =>
+				await proxyFetch({ input, init, egressFilter }),
+			model: modelName,
 		});
 
 		return {

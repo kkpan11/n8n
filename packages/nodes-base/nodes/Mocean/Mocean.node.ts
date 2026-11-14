@@ -9,8 +9,9 @@ import type {
 	INodeTypeDescription,
 	JsonObject,
 	IHttpRequestMethods,
+	RequestPath,
 } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeConnectionTypes, NodeOperationError, requestPath } from 'n8n-workflow';
 
 import { moceanApiRequest } from './GenericFunctions';
 
@@ -26,8 +27,9 @@ export class Mocean implements INodeType {
 		defaults: {
 			name: 'Mocean',
 		},
-		inputs: ['main'],
-		outputs: ['main'],
+		usableAsTool: true,
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
 		credentials: [
 			{
 				name: 'moceanApi',
@@ -219,7 +221,7 @@ export class Mocean implements INodeType {
 		const items = this.getInputData();
 		const returnData: IDataObject[] = [];
 
-		let endpoint: string;
+		let endpoint: RequestPath;
 		let operation: string;
 		let requestMethod: IHttpRequestMethods;
 		let resource: string;
@@ -254,7 +256,7 @@ export class Mocean implements INodeType {
 
 					dataKey = 'voice';
 					body['mocean-command'] = JSON.stringify(command);
-					endpoint = '/rest/2/voice/dial';
+					endpoint = requestPath`/rest/2/voice/dial`;
 				} else if (resource === 'sms') {
 					dlrUrl = this.getNodeParameter('options.dlrUrl', itemIndex, '') as string;
 					dataKey = 'messages';
@@ -263,7 +265,7 @@ export class Mocean implements INodeType {
 						body['mocean-dlr-url'] = dlrUrl;
 						body['mocean-dlr-mask'] = '1';
 					}
-					endpoint = '/rest/2/sms';
+					endpoint = requestPath`/rest/2/sms`;
 				} else {
 					throw new NodeOperationError(this.getNode(), `Unknown resource ${resource}`, {
 						itemIndex,
@@ -283,7 +285,7 @@ export class Mocean implements INodeType {
 					});
 				}
 			} catch (error) {
-				if (this.continueOnFail(error)) {
+				if (this.continueOnFail()) {
 					returnData.push({ error: (error as JsonObject).message });
 					continue;
 				}

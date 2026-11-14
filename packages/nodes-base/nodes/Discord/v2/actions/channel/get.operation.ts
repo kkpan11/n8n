@@ -4,6 +4,8 @@ import type {
 	INodeExecutionData,
 	INodeProperties,
 } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
+
 import { updateDisplayOptions } from '../../../../../utils/utilities';
 import { parseDiscordError, prepareErrorData, setupChannelGetter } from '../../helpers/utils';
 import { discordApiRequest } from '../../transport';
@@ -37,7 +39,11 @@ export async function execute(
 		try {
 			const channelId = await getChannelId(i);
 
-			const response = await discordApiRequest.call(this, 'GET', `/channels/${channelId}`);
+			const response = await discordApiRequest.call(
+				this,
+				'GET',
+				requestPath`/channels/${channelId}`,
+			);
 
 			const executionData = this.helpers.constructExecutionMetaData(
 				this.helpers.returnJsonArray(response),
@@ -48,7 +54,7 @@ export async function execute(
 		} catch (error) {
 			const err = parseDiscordError.call(this, error, i);
 
-			if (this.continueOnFail(error)) {
+			if (this.continueOnFail()) {
 				returnData.push(...prepareErrorData.call(this, err, i));
 				continue;
 			}

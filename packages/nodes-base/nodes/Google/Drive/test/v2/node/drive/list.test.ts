@@ -1,22 +1,21 @@
-import nock from 'nock';
 import type { IHttpRequestMethods } from 'n8n-workflow';
+import { requestPath } from 'n8n-workflow';
 
 import * as list from '../../../../v2/actions/drive/list.operation';
-
 import * as transport from '../../../../v2/transport';
-
 import { createMockExecuteFunction, driveNode } from '../helpers';
+import type * as _importType0 from '../../../../v2/transport';
 
-jest.mock('../../../../v2/transport', () => {
-	const originalModule = jest.requireActual('../../../../v2/transport');
+vi.mock('../../../../v2/transport', async () => {
+	const originalModule = await vi.importActual<typeof _importType0>('../../../../v2/transport');
 	return {
 		...originalModule,
-		googleApiRequest: jest.fn(async function (method: IHttpRequestMethods) {
+		googleApiRequest: vi.fn(async function (method: IHttpRequestMethods) {
 			if (method === 'GET') {
 				return {};
 			}
 		}),
-		googleApiRequestAllItems: jest.fn(async function (method: IHttpRequestMethods) {
+		googleApiRequestAllItems: vi.fn(async function (method: IHttpRequestMethods) {
 			if (method === 'GET') {
 				return {};
 			}
@@ -25,15 +24,6 @@ jest.mock('../../../../v2/transport', () => {
 });
 
 describe('test GoogleDriveV2: drive list', () => {
-	beforeAll(() => {
-		nock.disableNetConnect();
-	});
-
-	afterAll(() => {
-		nock.restore();
-		jest.unmock('../../../../v2/transport');
-	});
-
 	it('should be called with limit', async () => {
 		const nodeParameters = {
 			resource: 'drive',
@@ -49,7 +39,7 @@ describe('test GoogleDriveV2: drive list', () => {
 		expect(transport.googleApiRequest).toBeCalledTimes(1);
 		expect(transport.googleApiRequest).toHaveBeenCalledWith(
 			'GET',
-			'/drive/v3/drives',
+			requestPath`/drive/v3/drives`,
 			{},
 			{ pageSize: 20 },
 		);
@@ -71,7 +61,7 @@ describe('test GoogleDriveV2: drive list', () => {
 		expect(transport.googleApiRequestAllItems).toHaveBeenCalledWith(
 			'GET',
 			'drives',
-			'/drive/v3/drives',
+			requestPath`/drive/v3/drives`,
 			{},
 			{},
 		);

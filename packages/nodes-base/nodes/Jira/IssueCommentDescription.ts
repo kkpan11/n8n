@@ -111,7 +111,7 @@ export const issueCommentFields: INodeProperties[] = [
 		displayName: 'Options',
 		name: 'options',
 		type: 'collection',
-		placeholder: 'Add Option',
+		placeholder: 'Add option',
 		default: {},
 		displayOptions: {
 			show: {
@@ -141,7 +141,7 @@ export const issueCommentFields: INodeProperties[] = [
 				default: false,
 				displayOptions: {
 					show: {
-						'/jiraVersion': ['cloud'],
+						'/jiraVersion': ['cloud', 'cloudOAuth2', 'cloudServiceAccount'],
 					},
 				},
 				description:
@@ -414,7 +414,7 @@ export const issueCommentFields: INodeProperties[] = [
 		displayName: 'Options',
 		name: 'options',
 		type: 'collection',
-		placeholder: 'Add Option',
+		placeholder: 'Add option',
 		default: {},
 		displayOptions: {
 			show: {
@@ -444,7 +444,7 @@ export const issueCommentFields: INodeProperties[] = [
 				default: false,
 				displayOptions: {
 					show: {
-						'/jiraVersion': ['cloud'],
+						'/jiraVersion': ['cloud', 'cloudOAuth2', 'cloudServiceAccount'],
 					},
 				},
 				description:

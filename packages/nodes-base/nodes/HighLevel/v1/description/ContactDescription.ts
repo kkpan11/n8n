@@ -1,4 +1,5 @@
 import type { INodeProperties } from 'n8n-workflow';
+
 import { splitTagsPreSendAction, validEmailAndPhonePreSendAction } from '../GenericFunctions';
 
 export const contactOperations: INodeProperties[] = [
@@ -43,7 +44,7 @@ export const contactOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'DELETE',
-						url: '=/contacts/{{$parameter.contactId}}',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}',
 					},
 					output: {
 						postReceive: [
@@ -64,7 +65,7 @@ export const contactOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'GET',
-						url: '=/contacts/{{$parameter.contactId}}',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}',
 					},
 					output: {
 						postReceive: [
@@ -99,7 +100,7 @@ export const contactOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'GET',
-						url: '=/contacts/lookup?email={{$parameter.email}}&phone={{$parameter.phone}}',
+						url: '/contacts/lookup',
 					},
 					output: {
 						postReceive: [
@@ -120,7 +121,7 @@ export const contactOperations: INodeProperties[] = [
 				routing: {
 					request: {
 						method: 'PUT',
-						url: '=/contacts/{{$parameter.contactId}}',
+						url: '=/contacts/{{toPathSegment($parameter.contactId)}}',
 					},
 					send: {
 						preSend: [validEmailAndPhonePreSendAction, splitTagsPreSendAction],
@@ -180,7 +181,7 @@ const customFields: INodeProperties = {
 					required: true,
 					default: '',
 					description:
-						'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>',
+						'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 					typeOptions: {
 						loadOptions: {
 							routing: {
@@ -422,7 +423,7 @@ const createProperties: INodeProperties[] = [
 				type: 'options',
 				default: '',
 				description:
-					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>',
+					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 				typeOptions: {
 					loadOptionsMethod: 'getTimezones',
 				},
@@ -625,7 +626,7 @@ const updateProperties: INodeProperties[] = [
 				type: 'options',
 				default: '',
 				description:
-					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>',
+					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 				typeOptions: {
 					loadOptionsMethod: 'getTimezones',
 				},
@@ -757,7 +758,7 @@ const getAllProperties: INodeProperties[] = [
 		displayName: 'Options',
 		name: 'options',
 		type: 'collection',
-		placeholder: 'Add Option',
+		placeholder: 'Add option',
 		default: {},
 		displayOptions: {
 			show: {
@@ -829,6 +830,12 @@ const lookupProperties: INodeProperties[] = [
 			},
 		},
 		default: '',
+		routing: {
+			send: {
+				type: 'query',
+				property: 'email',
+			},
+		},
 	},
 	{
 		displayName: 'Phone',
@@ -843,6 +850,12 @@ const lookupProperties: INodeProperties[] = [
 			},
 		},
 		default: '',
+		routing: {
+			send: {
+				type: 'query',
+				property: 'phone',
+			},
+		},
 	},
 ];
 

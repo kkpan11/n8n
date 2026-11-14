@@ -7,12 +7,19 @@ import type {
 	INodeType,
 	INodeTypeDescription,
 	JsonObject,
+	RequestPath,
 } from 'n8n-workflow';
-import { NodeApiError } from 'n8n-workflow';
-import { codaApiRequest, codaApiRequestAllItems } from './GenericFunctions';
-import { tableFields, tableOperations } from './TableDescription';
-import { formulaFields, formulaOperations } from './FormulaDescription';
+import { NodeConnectionTypes, NodeApiError, requestPath } from 'n8n-workflow';
+
 import { controlFields, controlOperations } from './ControlDescription';
+import { formulaFields, formulaOperations } from './FormulaDescription';
+import {
+	codaApiRequest,
+	codaApiRequestAllItems,
+	currentPathParam,
+	toPathValue,
+} from './GenericFunctions';
+import { tableFields, tableOperations } from './TableDescription';
 import { viewFields, viewOperations } from './ViewDescription';
 
 export class Coda implements INodeType {
@@ -21,14 +28,15 @@ export class Coda implements INodeType {
 		name: 'coda',
 		icon: 'file:coda.svg',
 		group: ['output'],
-		version: [1, 1.1],
+		version: [1, 1.1, 1.2],
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description: 'Consume Coda API',
 		defaults: {
 			name: 'Coda',
 		},
-		inputs: ['main'],
-		outputs: ['main'],
+		usableAsTool: true,
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
 		credentials: [
 			{
 				name: 'codaApi',
@@ -84,7 +92,14 @@ export class Coda implements INodeType {
 			async getDocs(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
 				const qs = {};
-				const docs = await codaApiRequestAllItems.call(this, 'items', 'GET', '/docs', {}, qs);
+				const docs = await codaApiRequestAllItems.call(
+					this,
+					'items',
+					'GET',
+					requestPath`/docs`,
+					{},
+					qs,
+				);
 				for (const doc of docs) {
 					const docName = doc.name;
 					const docId = doc.id;
@@ -100,13 +115,13 @@ export class Coda implements INodeType {
 			async getTables(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
 
-				const docId = this.getCurrentNodeParameter('docId');
+				const docId = currentPathParam(this, 'docId');
 
 				const tables = await codaApiRequestAllItems.call(
 					this,
 					'items',
 					'GET',
-					`/docs/${docId}/tables`,
+					requestPath`/docs/${docId}/tables`,
 					{},
 				);
 				for (const table of tables) {
@@ -124,14 +139,14 @@ export class Coda implements INodeType {
 			async getColumns(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
 
-				const docId = this.getCurrentNodeParameter('docId');
-				const tableId = this.getCurrentNodeParameter('tableId');
+				const docId = currentPathParam(this, 'docId');
+				const tableId = currentPathParam(this, 'tableId');
 
 				const columns = await codaApiRequestAllItems.call(
 					this,
 					'items',
 					'GET',
-					`/docs/${docId}/tables/${tableId}/columns`,
+					requestPath`/docs/${docId}/tables/${tableId}/columns`,
 					{},
 				);
 				for (const column of columns) {
@@ -148,13 +163,14 @@ export class Coda implements INodeType {
 			// select them easily
 			async getViews(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
-				const docId = this.getCurrentNodeParameter('docId');
+				const docId = currentPathParam(this, 'docId');
 				const views = await codaApiRequestAllItems.call(
 					this,
 					'items',
 					'GET',
-					`/docs/${docId}/tables?tableTypes=view`,
+					requestPath`/docs/${docId}/tables`,
 					{},
+					{ tableTypes: 'view' },
 				);
 				for (const view of views) {
 					const viewName = view.name;
@@ -170,12 +186,12 @@ export class Coda implements INodeType {
 			// select them easily
 			async getFormulas(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
-				const docId = this.getCurrentNodeParameter('docId');
+				const docId = currentPathParam(this, 'docId');
 				const formulas = await codaApiRequestAllItems.call(
 					this,
 					'items',
 					'GET',
-					`/docs/${docId}/formulas`,
+					requestPath`/docs/${docId}/formulas`,
 					{},
 				);
 				for (const formula of formulas) {
@@ -192,13 +208,13 @@ export class Coda implements INodeType {
 			// select them easily
 			async getViewRows(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
-				const docId = this.getCurrentNodeParameter('docId');
-				const viewId = this.getCurrentNodeParameter('viewId');
+				const docId = currentPathParam(this, 'docId');
+				const viewId = currentPathParam(this, 'viewId');
 				const viewRows = await codaApiRequestAllItems.call(
 					this,
 					'items',
 					'GET',
-					`/docs/${docId}/tables/${viewId}/rows`,
+					requestPath`/docs/${docId}/tables/${viewId}/rows`,
 					{},
 				);
 				for (const viewRow of viewRows) {
@@ -216,14 +232,14 @@ export class Coda implements INodeType {
 			async getViewColumns(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
 
-				const docId = this.getCurrentNodeParameter('docId');
-				const viewId = this.getCurrentNodeParameter('viewId');
+				const docId = currentPathParam(this, 'docId');
+				const viewId = currentPathParam(this, 'viewId');
 
 				const viewColumns = await codaApiRequestAllItems.call(
 					this,
 					'items',
 					'GET',
-					`/docs/${docId}/tables/${viewId}/columns`,
+					requestPath`/docs/${docId}/tables/${viewId}/columns`,
 					{},
 				);
 				for (const viewColumn of viewColumns) {
@@ -241,6 +257,8 @@ export class Coda implements INodeType {
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const nodeVersion = this.getNode().typeVersion;
+		const pathParam = (name: string, i: number) =>
+			toPathValue(nodeVersion, this.getNodeParameter(name, i) as string);
 		const returnData: INodeExecutionData[] = [];
 		const items = this.getInputData();
 		let responseData;
@@ -253,12 +271,15 @@ export class Coda implements INodeType {
 			if (operation === 'createRow') {
 				try {
 					const sendData = {} as IDataObject;
+					const paths: Record<string, RequestPath> = {};
 					for (let i = 0; i < items.length; i++) {
 						qs = {};
-						const docId = this.getNodeParameter('docId', i) as string;
-						const tableId = this.getNodeParameter('tableId', i) as string;
+						const docId = pathParam('docId', i);
+						const tableId = pathParam('tableId', i);
 						const options = this.getNodeParameter('options', i);
-						const endpoint = `/docs/${docId}/tables/${tableId}/rows`;
+						const path = requestPath`/docs/${docId}/tables/${tableId}/rows`;
+						const endpoint = path.value;
+						paths[endpoint] = path;
 
 						if (options.disableParsing) {
 							qs.disableParsing = options.disableParsing as boolean;
@@ -297,13 +318,13 @@ export class Coda implements INodeType {
 						await codaApiRequest.call(
 							this,
 							'POST',
-							endpoint,
+							paths[endpoint],
 							sendData[endpoint],
 							(sendData[endpoint]! as IDataObject).qs! as IDataObject,
 						);
 					}
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						return [this.helpers.returnJsonArray({ error: error.message })];
 					}
 					throw error;
@@ -315,12 +336,12 @@ export class Coda implements INodeType {
 			if (operation === 'getRow') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const tableId = this.getNodeParameter('tableId', i) as string;
-						const rowId = this.getNodeParameter('rowId', i) as string;
+						const docId = pathParam('docId', i);
+						const tableId = pathParam('tableId', i);
+						const rowId = pathParam('rowId', i);
 						const options = this.getNodeParameter('options', i);
 
-						const endpoint = `/docs/${docId}/tables/${tableId}/rows/${rowId}`;
+						const endpoint = requestPath`/docs/${docId}/tables/${tableId}/rows/${rowId}`;
 						if (options.useColumnNames === false) {
 							qs.useColumnNames = options.useColumnNames as boolean;
 						} else {
@@ -348,7 +369,7 @@ export class Coda implements INodeType {
 							returnData.push(...executionData);
 						}
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -371,11 +392,11 @@ export class Coda implements INodeType {
 				}
 
 				for (let i = 0; i < itemsLength; i++) {
-					const docId = this.getNodeParameter('docId', i) as string;
+					const docId = pathParam('docId', i);
 					const returnAll = this.getNodeParameter('returnAll', i);
-					const tableId = this.getNodeParameter('tableId', i) as string;
+					const tableId = pathParam('tableId', i);
 					const options = this.getNodeParameter('options', i);
-					const endpoint = `/docs/${docId}/tables/${tableId}/rows`;
+					const endpoint = requestPath`/docs/${docId}/tables/${tableId}/rows`;
 					if (options.useColumnNames === false) {
 						qs.useColumnNames = options.useColumnNames as boolean;
 					} else {
@@ -428,7 +449,7 @@ export class Coda implements INodeType {
 							}
 						}
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							returnData.push({
 								json: { error: error.message },
 								pairedItem: [{ item: i }],
@@ -445,11 +466,14 @@ export class Coda implements INodeType {
 			if (operation === 'deleteRow') {
 				try {
 					const sendData = {} as IDataObject;
+					const paths: Record<string, RequestPath> = {};
 					for (let i = 0; i < items.length; i++) {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const tableId = this.getNodeParameter('tableId', i) as string;
+						const docId = pathParam('docId', i);
+						const tableId = pathParam('tableId', i);
 						const rowId = this.getNodeParameter('rowId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${tableId}/rows`;
+						const path = requestPath`/docs/${docId}/tables/${tableId}/rows`;
+						const endpoint = path.value;
+						paths[endpoint] = path;
 
 						// Collect all the data for the different docs/tables
 						if (sendData[endpoint] === undefined) {
@@ -461,10 +485,16 @@ export class Coda implements INodeType {
 
 					// Now that all data got collected make all the requests
 					for (const endpoint of Object.keys(sendData)) {
-						await codaApiRequest.call(this, 'DELETE', endpoint, { rowIds: sendData[endpoint] }, qs);
+						await codaApiRequest.call(
+							this,
+							'DELETE',
+							paths[endpoint],
+							{ rowIds: sendData[endpoint] },
+							qs,
+						);
 					}
 				} catch (error) {
-					if (this.continueOnFail(error)) {
+					if (this.continueOnFail()) {
 						return [this.helpers.returnJsonArray({ error: error.message })];
 					}
 					throw error;
@@ -476,15 +506,15 @@ export class Coda implements INodeType {
 			if (operation === 'pushButton') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const tableId = this.getNodeParameter('tableId', i) as string;
-						const rowId = this.getNodeParameter('rowId', i) as string;
-						const columnId = this.getNodeParameter('columnId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${tableId}/rows/${rowId}/buttons/${columnId}`;
+						const docId = pathParam('docId', i);
+						const tableId = pathParam('tableId', i);
+						const rowId = pathParam('rowId', i);
+						const columnId = pathParam('columnId', i);
+						const endpoint = requestPath`/docs/${docId}/tables/${tableId}/rows/${rowId}/buttons/${columnId}`;
 						responseData = await codaApiRequest.call(this, 'POST', endpoint, {});
 						returnData.push(responseData as INodeExecutionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -501,10 +531,10 @@ export class Coda implements INodeType {
 			if (operation === 'getColumn') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const tableId = this.getNodeParameter('tableId', i) as string;
-						const columnId = this.getNodeParameter('columnId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${tableId}/columns/${columnId}`;
+						const docId = pathParam('docId', i);
+						const tableId = pathParam('tableId', i);
+						const columnId = pathParam('columnId', i);
+						const endpoint = requestPath`/docs/${docId}/tables/${tableId}/columns/${columnId}`;
 						responseData = await codaApiRequest.call(this, 'GET', endpoint, {});
 						const executionData = this.helpers.constructExecutionMetaData(
 							this.helpers.returnJsonArray(responseData as IDataObject[]),
@@ -512,7 +542,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -530,9 +560,9 @@ export class Coda implements INodeType {
 				for (let i = 0; i < items.length; i++) {
 					try {
 						const returnAll = this.getNodeParameter('returnAll', 0);
-						const docId = this.getNodeParameter('docId', i) as string;
-						const tableId = this.getNodeParameter('tableId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${tableId}/columns`;
+						const docId = pathParam('docId', i);
+						const tableId = pathParam('tableId', i);
+						const endpoint = requestPath`/docs/${docId}/tables/${tableId}/columns`;
 						if (returnAll) {
 							responseData = await codaApiRequestAllItems.call(this, 'items', 'GET', endpoint, {});
 						} else {
@@ -546,7 +576,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -565,9 +595,9 @@ export class Coda implements INodeType {
 			if (operation === 'get') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const formulaId = this.getNodeParameter('formulaId', i) as string;
-						const endpoint = `/docs/${docId}/formulas/${formulaId}`;
+						const docId = pathParam('docId', i);
+						const formulaId = pathParam('formulaId', i);
+						const endpoint = requestPath`/docs/${docId}/formulas/${formulaId}`;
 						responseData = await codaApiRequest.call(this, 'GET', endpoint, {});
 						const executionData = this.helpers.constructExecutionMetaData(
 							this.helpers.returnJsonArray(responseData as IDataObject[]),
@@ -575,7 +605,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -593,8 +623,8 @@ export class Coda implements INodeType {
 				for (let i = 0; i < items.length; i++) {
 					try {
 						const returnAll = this.getNodeParameter('returnAll', 0);
-						const docId = this.getNodeParameter('docId', i) as string;
-						const endpoint = `/docs/${docId}/formulas`;
+						const docId = pathParam('docId', i);
+						const endpoint = requestPath`/docs/${docId}/formulas`;
 						if (returnAll) {
 							responseData = await codaApiRequestAllItems.call(this, 'items', 'GET', endpoint, {});
 						} else {
@@ -608,7 +638,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -627,9 +657,9 @@ export class Coda implements INodeType {
 			if (operation === 'get') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const controlId = this.getNodeParameter('controlId', i) as string;
-						const endpoint = `/docs/${docId}/controls/${controlId}`;
+						const docId = pathParam('docId', i);
+						const controlId = pathParam('controlId', i);
+						const endpoint = requestPath`/docs/${docId}/controls/${controlId}`;
 						responseData = await codaApiRequest.call(this, 'GET', endpoint, {});
 						const executionData = this.helpers.constructExecutionMetaData(
 							this.helpers.returnJsonArray(responseData as IDataObject[]),
@@ -637,7 +667,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -656,8 +686,8 @@ export class Coda implements INodeType {
 				qs.limit = this.getNodeParameter('limit', 0);
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const endpoint = `/docs/${docId}/controls`;
+						const docId = pathParam('docId', i);
+						const endpoint = requestPath`/docs/${docId}/controls`;
 						if (returnAll) {
 							responseData = await codaApiRequestAllItems.call(this, 'items', 'GET', endpoint, {});
 						} else {
@@ -670,7 +700,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -688,9 +718,9 @@ export class Coda implements INodeType {
 			//https://coda.io/developers/apis/v1beta1#operation/getView
 			if (operation === 'get') {
 				for (let i = 0; i < items.length; i++) {
-					const docId = this.getNodeParameter('docId', i) as string;
-					const viewId = this.getNodeParameter('viewId', i) as string;
-					const endpoint = `/docs/${docId}/tables/${viewId}`;
+					const docId = pathParam('docId', i);
+					const viewId = pathParam('viewId', i);
+					const endpoint = requestPath`/docs/${docId}/tables/${viewId}`;
 					responseData = await codaApiRequest.call(this, 'GET', endpoint, {});
 					const executionData = this.helpers.constructExecutionMetaData(
 						this.helpers.returnJsonArray(responseData as IDataObject[]),
@@ -703,13 +733,21 @@ export class Coda implements INodeType {
 			//https://coda.io/developers/apis/v1beta1#operation/listViews
 			if (operation === 'getAll') {
 				const returnAll = this.getNodeParameter('returnAll', 0);
+				qs.tableTypes = 'view';
 				qs.limit = this.getNodeParameter('limit', 0);
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const endpoint = `/docs/${docId}/tables?tableTypes=view`;
+						const docId = pathParam('docId', i);
+						const endpoint = requestPath`/docs/${docId}/tables`;
 						if (returnAll) {
-							responseData = await codaApiRequestAllItems.call(this, 'items', 'GET', endpoint, {});
+							responseData = await codaApiRequestAllItems.call(
+								this,
+								'items',
+								'GET',
+								endpoint,
+								{},
+								qs,
+							);
 						} else {
 							responseData = await codaApiRequest.call(this, 'GET', endpoint, {}, qs);
 							responseData = responseData.items;
@@ -720,7 +758,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...responseData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -741,11 +779,11 @@ export class Coda implements INodeType {
 				}
 
 				for (let i = 0; i < itemsLength; i++) {
-					const docId = this.getNodeParameter('docId', i) as string;
+					const docId = pathParam('docId', i);
 					const returnAll = this.getNodeParameter('returnAll', i);
-					const viewId = this.getNodeParameter('viewId', i) as string;
+					const viewId = pathParam('viewId', i);
 					const options = this.getNodeParameter('options', i);
-					const endpoint = `/docs/${docId}/tables/${viewId}/rows`;
+					const endpoint = requestPath`/docs/${docId}/tables/${viewId}/rows`;
 					if (options.useColumnNames === false) {
 						qs.useColumnNames = options.useColumnNames as boolean;
 					} else {
@@ -795,7 +833,7 @@ export class Coda implements INodeType {
 							}
 						}
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							returnData.push({
 								json: { error: error.message },
 								pairedItem: [{ item: i }],
@@ -812,10 +850,10 @@ export class Coda implements INodeType {
 			if (operation === 'deleteViewRow') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const viewId = this.getNodeParameter('viewId', i) as string;
-						const rowId = this.getNodeParameter('rowId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${viewId}/rows/${rowId}`;
+						const docId = pathParam('docId', i);
+						const viewId = pathParam('viewId', i);
+						const rowId = pathParam('rowId', i);
+						const endpoint = requestPath`/docs/${docId}/tables/${viewId}/rows/${rowId}`;
 						responseData = await codaApiRequest.call(this, 'DELETE', endpoint);
 						const executionData = this.helpers.constructExecutionMetaData(
 							this.helpers.returnJsonArray(responseData as IDataObject[]),
@@ -823,7 +861,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -840,11 +878,11 @@ export class Coda implements INodeType {
 			if (operation === 'pushViewButton') {
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const viewId = this.getNodeParameter('viewId', i) as string;
-						const rowId = this.getNodeParameter('rowId', i) as string;
-						const columnId = this.getNodeParameter('columnId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${viewId}/rows/${rowId}/buttons/${columnId}`;
+						const docId = pathParam('docId', i);
+						const viewId = pathParam('viewId', i);
+						const rowId = pathParam('rowId', i);
+						const columnId = pathParam('columnId', i);
+						const endpoint = requestPath`/docs/${docId}/tables/${viewId}/rows/${rowId}/buttons/${columnId}`;
 						responseData = await codaApiRequest.call(this, 'POST', endpoint);
 						const executionData = this.helpers.constructExecutionMetaData(
 							this.helpers.returnJsonArray(responseData as IDataObject),
@@ -852,7 +890,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -870,9 +908,9 @@ export class Coda implements INodeType {
 				qs.limit = this.getNodeParameter('limit', 0);
 				for (let i = 0; i < items.length; i++) {
 					try {
-						const docId = this.getNodeParameter('docId', i) as string;
-						const viewId = this.getNodeParameter('viewId', i) as string;
-						const endpoint = `/docs/${docId}/tables/${viewId}/columns`;
+						const docId = pathParam('docId', i);
+						const viewId = pathParam('viewId', i);
+						const endpoint = requestPath`/docs/${docId}/tables/${viewId}/columns`;
 						if (returnAll) {
 							responseData = await codaApiRequestAllItems.call(this, 'items', 'GET', endpoint, {});
 						} else {
@@ -885,7 +923,7 @@ export class Coda implements INodeType {
 						);
 						returnData.push(...executionData);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							const executionErrorData = this.helpers.constructExecutionMetaData(
 								this.helpers.returnJsonArray({ error: error.messsage }),
 								{ itemData: { item: i } },
@@ -903,13 +941,13 @@ export class Coda implements INodeType {
 				for (let i = 0; i < items.length; i++) {
 					try {
 						qs = {};
-						const docId = this.getNodeParameter('docId', i) as string;
-						const viewId = this.getNodeParameter('viewId', i) as string;
-						const rowId = this.getNodeParameter('rowId', i) as string;
+						const docId = pathParam('docId', i);
+						const viewId = pathParam('viewId', i);
+						const rowId = pathParam('rowId', i);
 						const keyName = this.getNodeParameter('keyName', i) as string;
 						const options = this.getNodeParameter('options', i);
 						const body: IDataObject = {};
-						const endpoint = `/docs/${docId}/tables/${viewId}/rows/${rowId}`;
+						const endpoint = requestPath`/docs/${docId}/tables/${viewId}/rows/${rowId}`;
 						if (options.disableParsing) {
 							qs.disableParsing = options.disableParsing as boolean;
 						}
@@ -929,7 +967,7 @@ export class Coda implements INodeType {
 						};
 						await codaApiRequest.call(this, 'PUT', endpoint, body, qs);
 					} catch (error) {
-						if (this.continueOnFail(error)) {
+						if (this.continueOnFail()) {
 							items[i].json = { error: error.message };
 							continue;
 						}

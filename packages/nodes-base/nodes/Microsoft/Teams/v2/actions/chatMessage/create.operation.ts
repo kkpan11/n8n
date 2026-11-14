@@ -1,8 +1,15 @@
 import type { INodeProperties, IExecuteFunctions, IDataObject } from 'n8n-workflow';
-import { prepareMessage } from '../../helpers/utils';
-import { microsoftApiRequest } from '../../transport';
-import { chatRLC } from '../../descriptions';
+
 import { updateDisplayOptions } from '@utils/utilities';
+
+import {
+	chatRLC,
+	includeLinkToWorkflowOption,
+	mentionPlacementOption,
+	mentionsField,
+} from '../../descriptions';
+import { prepareMessage, resolveMentions } from '../../helpers/utils';
+import { buildTeamsPath, microsoftApiRequest, SP_HIDE } from '../../transport';
 
 const properties: INodeProperties[] = [
 	chatRLC,
@@ -35,23 +42,15 @@ const properties: INodeProperties[] = [
 			rows: 2,
 		},
 	},
+	mentionsField,
 	{
 		displayName: 'Options',
 		name: 'options',
 		type: 'collection',
 		default: {},
 		description: 'Other options to set',
-		placeholder: 'Add options',
-		options: [
-			{
-				displayName: 'Include Link to Workflow',
-				name: 'includeLinkToWorkflow',
-				type: 'boolean',
-				default: true,
-				description:
-					'Whether to append a link to this workflow at the end of the message. This is helpful if you have many workflows sending messages.',
-			},
-		],
+		placeholder: 'Add option',
+		options: [includeLinkToWorkflowOption, mentionPlacementOption],
 	},
 ];
 
@@ -59,6 +58,9 @@ const displayOptions = {
 	show: {
 		resource: ['chatMessage'],
 		operation: ['create'],
+	},
+	hide: {
+		...SP_HIDE,
 	},
 };
 
@@ -74,13 +76,21 @@ export async function execute(this: IExecuteFunctions, i: number, instanceId: st
 
 	const includeLinkToWorkflow = options.includeLinkToWorkflow !== false;
 
+	// Built before the mentions are resolved, so a malformed chat ID fails without spending a
+	// Graph call on `GET /users/{id}` first.
+	const endpoint = buildTeamsPath.call(this, ['/v1.0/chats/', { id: chatId }, '/messages']);
+
+	const mentions = await resolveMentions.call(this, i);
+
 	const body: IDataObject = prepareMessage.call(
 		this,
 		message,
 		contentType,
 		includeLinkToWorkflow,
 		instanceId,
+		mentions,
+		options.mentionPlacement === 'end' ? 'end' : 'start',
 	);
 
-	return await microsoftApiRequest.call(this, 'POST', `/v1.0/chats/${chatId}/messages`, body);
+	return await microsoftApiRequest.call(this, 'POST', endpoint, body);
 }

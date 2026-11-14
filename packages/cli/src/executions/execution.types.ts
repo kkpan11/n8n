@@ -1,24 +1,26 @@
-import type { ExecutionEntity } from '@/databases/entities/ExecutionEntity';
-import type { AuthenticatedRequest } from '@/requests';
-import type { ExecutionStatus, IDataObject, WorkflowExecuteMode } from 'n8n-workflow';
+import type { SerializedCursor } from '@n8n/api-types';
+import type {
+	AuthenticatedRequest,
+	ExecutionSummaries,
+	ExecutionEntity,
+	IExecutionResponse,
+} from '@n8n/db';
+import type { AnnotationVote, ExecutionStatus, WorkflowExecuteMode } from 'n8n-workflow';
+
+import type { ExecutionCursor } from '@/executions/execution-cursor';
 
 export declare namespace ExecutionRequest {
 	namespace QueryParams {
 		type GetMany = {
+			cursor?: SerializedCursor;
 			filter: string; // stringified `FilterFields`
 			limit: string;
-			lastId: string;
-			firstId: string;
 		};
-
-		type GetOne = { unflattedResponse: 'true' | 'false' };
 	}
 
 	namespace BodyParams {
-		type DeleteFilter = {
-			deleteBefore?: Date;
-			filters?: IDataObject;
-			ids?: string[];
+		type StopMany = {
+			filter: ExecutionSummaries.StopExecutionFilterQuery; // stringified `FilterFields`
 		};
 	}
 
@@ -28,79 +30,37 @@ export declare namespace ExecutionRequest {
 		};
 	}
 
+	type ExecutionUpdatePayload = {
+		tags?: string[];
+		vote?: AnnotationVote | null;
+	};
+
 	type GetMany = AuthenticatedRequest<{}, {}, {}, QueryParams.GetMany> & {
 		rangeQuery: ExecutionSummaries.RangeQuery; // parsed from query params
+		cursor?: ExecutionCursor;
 	};
 
-	type GetOne = AuthenticatedRequest<RouteParams.ExecutionId, {}, {}, QueryParams.GetOne>;
+	type GetOne = AuthenticatedRequest<RouteParams.ExecutionId>;
 
-	type Delete = AuthenticatedRequest<{}, {}, BodyParams.DeleteFilter>;
+	type GetVersions = AuthenticatedRequest<{ workflowId: string }>;
 
-	type Retry = AuthenticatedRequest<RouteParams.ExecutionId, {}, { loadWorkflow: boolean }, {}>;
+	type Retry = AuthenticatedRequest<RouteParams.ExecutionId, {}, { loadWorkflow?: boolean }, {}>;
 
 	type Stop = AuthenticatedRequest<RouteParams.ExecutionId>;
+	type StopMany = AuthenticatedRequest<{}, {}, BodyParams.StopMany>;
+
+	type Update = AuthenticatedRequest<RouteParams.ExecutionId, {}, ExecutionUpdatePayload, {}>;
 }
 
-export namespace ExecutionSummaries {
-	export type Query = RangeQuery | CountQuery;
-
-	export type RangeQuery = { kind: 'range' } & FilterFields &
-		AccessFields &
-		RangeFields &
-		OrderFields;
-
-	export type CountQuery = { kind: 'count' } & FilterFields & AccessFields;
-
-	type FilterFields = Partial<{
-		id: string;
-		finished: boolean;
-		mode: string;
-		retryOf: string;
-		retrySuccessId: string;
-		status: ExecutionStatus[];
-		workflowId: string;
-		waitTill: boolean;
-		metadata: Array<{ key: string; value: string }>;
-		startedAfter: string;
-		startedBefore: string;
-	}>;
-
-	type AccessFields = {
-		accessibleWorkflowIds?: string[];
-	};
-
-	type RangeFields = {
-		range: {
-			limit: number;
-			firstId?: string;
-			lastId?: string;
-		};
-	};
-
-	type OrderFields = {
-		order?: {
-			top?: ExecutionStatus;
-			stoppedAt?: 'DESC';
-		};
-	};
-}
-
-export type QueueRecoverySettings = {
-	/**
-	 * ID of timeout for next scheduled recovery cycle.
-	 */
-	timeout?: NodeJS.Timeout;
-
-	/**
-	 * Number of in-progress executions to check per cycle.
-	 */
-	batchSize: number;
-
-	/**
-	 * Time (in milliseconds) to wait before the next cycle.
-	 */
-	waitMs: number;
-};
+/**
+ * The execution a retry started. The execution data fields are absent when the
+ * user may not read the workflow's executions.
+ */
+export type RetriedExecution = Omit<
+	IExecutionResponse,
+	'createdAt' | 'data' | 'workflowData' | 'customData' | 'annotation'
+> &
+	Partial<Pick<IExecutionResponse, 'data' | 'workflowData' | 'customData' | 'annotation'>>;
 
 export type StopResult = {
 	mode: WorkflowExecuteMode;

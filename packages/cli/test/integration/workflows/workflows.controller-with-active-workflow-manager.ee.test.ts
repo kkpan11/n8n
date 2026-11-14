@@ -1,17 +1,21 @@
-import type { User } from '@db/entities/User';
+import {
+	createTeamProject,
+	testDb,
+	mockInstance,
+	createActiveWorkflow,
+} from '@n8n/backend-test-utils';
+import type { User } from '@n8n/db';
+import { Container } from '@n8n/di';
 
-import * as utils from '../shared/utils/';
-import * as testDb from '../shared/testDb';
-import { createUser } from '../shared/db/users';
-import { createWorkflowWithTrigger } from '../shared/db/workflows';
-import { createTeamProject } from '../shared/db/projects';
-import { mockInstance } from '@test/mocking';
+import { ActiveWorkflowManager } from '@/active-workflow-manager';
 import { Telemetry } from '@/telemetry';
+
+import { createUser } from '../shared/db/users';
+import * as utils from '../shared/utils/';
 
 mockInstance(Telemetry);
 
 let member: User;
-let anotherMember: User;
 
 const testServer = utils.setupTestServer({
 	endpointGroups: ['workflows'],
@@ -19,14 +23,24 @@ const testServer = utils.setupTestServer({
 });
 
 beforeAll(async () => {
-	member = await createUser({ role: 'global:member' });
-	anotherMember = await createUser({ role: 'global:member' });
+	member = await createUser({ role: { slug: 'global:member' } });
 
 	await utils.initNodeTypes();
 });
 
 beforeEach(async () => {
-	await testDb.truncate(['Workflow', 'SharedWorkflow']);
+	await testDb.truncate([
+		'WorkflowEntity',
+		'SharedWorkflow',
+		'WorkflowHistory',
+		'WorkflowPublishHistory',
+	]);
+});
+
+afterEach(async () => {
+	// This suite drives the real ActiveWorkflowManager, so anything it registers
+	// (cron jobs, webhooks) would otherwise stay live for the rest of the worker.
+	await Container.get(ActiveWorkflowManager).removeAll();
 });
 
 describe('PUT /:workflowId/transfer', () => {
@@ -38,7 +52,7 @@ describe('PUT /:workflowId/transfer', () => {
 		//
 		const destinationProject = await createTeamProject('Team Project', member);
 
-		const workflow = await createWorkflowWithTrigger({ active: true }, member);
+		const workflow = await createActiveWorkflow({}, member);
 
 		//
 		// ACT

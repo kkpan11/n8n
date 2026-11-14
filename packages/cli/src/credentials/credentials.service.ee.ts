@@ -1,17 +1,29 @@
-// eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
+import type { CredentialConnectionStatus, CredentialTransferPreview } from '@n8n/api-types';
+import { LicenseState } from '@n8n/backend-common';
+import type { User } from '@n8n/db';
+import {
+	CredentialsEntity,
+	Project,
+	SharedCredentials,
+	SharedCredentialsRepository,
+} from '@n8n/db';
+import { Service } from '@n8n/di';
+import { hasGlobalScope } from '@n8n/permissions';
 import { In, type EntityManager } from '@n8n/typeorm';
-import type { User } from '@db/entities/User';
-import { CredentialsService } from './credentials.service';
-import { SharedCredentialsRepository } from '@db/repositories/sharedCredentials.repository';
-import type { CredentialsEntity } from '@/databases/entities/CredentialsEntity';
-import { Service } from 'typedi';
 import type { ICredentialDataDecryptedObject } from 'n8n-workflow';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
-import { OwnershipService } from '@/services/ownership.service';
-import { Project } from '@/databases/entities/Project';
-import { ProjectService } from '@/services/project.service';
+
+import { NotFoundError } from '@n8n/errors';
 import { TransferCredentialError } from '@/errors/response-errors/transfer-credential.error';
-import { SharedCredentials } from '@/databases/entities/SharedCredentials';
+import { ExternalSecretsConfig } from '@/modules/external-secrets.ee/external-secrets.config';
+import { SecretsProviderAccessCheckService } from '@/modules/external-secrets.ee/secret-provider-access-check.service.ee';
+import { hasCheckErrors, PolicyEnforcementService } from '@/policy/policy-enforcement.service';
+import { OwnershipService } from '@/services/ownership.service';
+import { ProjectService } from '@/services/project.service.ee';
+import { RoleService, CredentialsFinderService } from '@n8n/backend-services';
+
+import { CredentialConnectionStatusProxy } from './credential-connection-status-proxy';
+import { CredentialsService } from './credentials.service';
+import { validateAccessToReferencedSecretProviders } from './validation';
 
 @Service()
 export class EnterpriseCredentialsService {
@@ -20,64 +32,125 @@ export class EnterpriseCredentialsService {
 		private readonly ownershipService: OwnershipService,
 		private readonly credentialsService: CredentialsService,
 		private readonly projectService: ProjectService,
+		private readonly credentialsFinderService: CredentialsFinderService,
+		private readonly roleService: RoleService,
+		private readonly externalSecretsConfig: ExternalSecretsConfig,
+		private readonly externalSecretsProviderAccessCheckService: SecretsProviderAccessCheckService,
+		private readonly licenseState: LicenseState,
+		private readonly connectionStatusProxy: CredentialConnectionStatusProxy,
+		private readonly policyEnforcementService: PolicyEnforcementService,
 	) {}
 
 	async shareWithProjects(
-		credential: CredentialsEntity,
+		user: User,
+		credentialId: string,
 		shareWithIds: string[],
 		entityManager?: EntityManager,
 	) {
 		const em = entityManager ?? this.sharedCredentialsRepository.manager;
-
-		const projects = await em.find(Project, {
-			where: { id: In(shareWithIds), type: 'personal' },
+		const canShare = await em.exists(CredentialsEntity, {
+			where: { id: credentialId, usageScope: 'project' },
 		});
+		if (!canShare) throw new NotFoundError('Credential not found');
 
-		const newSharedCredentials = projects
-			// We filter by role === 'project:personalOwner' above and there should
-			// always only be one owner.
-			.map((project) =>
-				this.sharedCredentialsRepository.create({
-					credentialsId: credential.id,
-					role: 'credential:user',
-					projectId: project.id,
-				}),
-			);
+		const roles = await this.roleService.rolesWithScope('project', ['project:list']);
+
+		let projects = await em.find(Project, {
+			where: [
+				{
+					id: In(shareWithIds),
+					type: 'team',
+					// if user can see all projects, don't check project access
+					// if they can't, find projects they can list
+					...(hasGlobalScope(user, 'project:list')
+						? {}
+						: {
+								projectRelations: {
+									userId: user.id,
+									role: In(roles),
+								},
+							}),
+				},
+				{
+					id: In(shareWithIds),
+					type: 'personal',
+				},
+			],
+			relations: { sharedCredentials: true },
+		});
+		// filter out all projects that already own the credential
+		projects = projects.filter(
+			(p) =>
+				!p.sharedCredentials.some(
+					(psc) => psc.credentialsId === credentialId && psc.role === 'credential:owner',
+				),
+		);
+
+		const newSharedCredentials = projects.map((project) =>
+			this.sharedCredentialsRepository.create({
+				credentialsId: credentialId,
+				role: 'credential:user',
+				projectId: project.id,
+			}),
+		);
 
 		return await em.save(newSharedCredentials);
 	}
 
-	async getOne(user: User, credentialId: string, includeDecryptedData: boolean) {
+	async getOne(credentialId: string) {
+		return await this.credentialsFinderService.findById(credentialId);
+	}
+
+	async getOneForUser(user: User, credentialId: string, includeDecryptedData: boolean) {
 		let credential: CredentialsEntity | null = null;
 		let decryptedData: ICredentialDataDecryptedObject | null = null;
 
 		credential = includeDecryptedData
 			? // Try to get the credential with `credential:update` scope, which
 				// are required for decrypting the data.
-				await this.sharedCredentialsRepository.findCredentialForUser(
+				await this.credentialsFinderService.findCredentialForUser(
 					credentialId,
 					user,
 					// TODO: replace credential:update with credential:decrypt once it lands
 					// see: https://n8nio.slack.com/archives/C062YRE7EG4/p1708531433206069?thread_ts=1708525972.054149&cid=C062YRE7EG4
+					// `credential:update` is its own gate: a see-only instance role never
+					// holds it, so this decrypt branch is unreachable for one.
 					['credential:read', 'credential:update'],
+					{ includeInstanceCredentials: true },
 				)
 			: null;
 
 		if (credential) {
 			// Decrypt the data if we found the credential with the `credential:update`
 			// scope.
-			decryptedData = this.credentialsService.redact(
-				this.credentialsService.decrypt(credential),
-				credential,
-			);
+			decryptedData = await this.credentialsService.decrypt(credential);
 		} else {
 			// Otherwise try to find them with only the `credential:read` scope. In
 			// that case we return them without the decrypted data.
-			credential = await this.sharedCredentialsRepository.findCredentialForUser(
+			credential = await this.credentialsFinderService.findCredentialForUser(
 				credentialId,
 				user,
 				['credential:read'],
+				// Detail-page metadata only — no `data` is returned on this branch, so
+				// seeing a credential you are not a member of is enough.
+				{ includeInstanceCredentials: true, visibilityOnly: true },
 			);
+
+			// Connect-capable users of a private credential need the redacted blueprint
+			// (secrets stay masked) so the UI can detect the OAuth type and render the
+			// per-user connect flow, even without edit rights.
+			if (
+				includeDecryptedData &&
+				credential?.isResolvable &&
+				(await this.credentialsFinderService.findCredentialForUser(
+					credentialId,
+					user,
+					['credential:connect'],
+					{ includeInstanceCredentials: true },
+				))
+			) {
+				decryptedData = await this.credentialsService.decrypt(credential);
+			}
 		}
 
 		if (!credential) {
@@ -90,16 +163,46 @@ export class EnterpriseCredentialsService {
 
 		const { data: _, ...rest } = credential;
 
-		if (decryptedData) {
-			return { data: decryptedData, ...rest };
+		const enriched: typeof rest & CredentialConnectionStatus = rest;
+		await this.credentialsService.populateConnectedByMe([enriched], user);
+
+		if (credential.isResolvable) {
+			enriched.connectedUserCount = await this.credentialsService.countConnectedUsers(
+				credential.id,
+			);
 		}
 
-		return { ...rest };
+		if (decryptedData) {
+			// We never want to expose the oauthTokenData to the frontend, but it
+			// expects it to check if the credential is already connected.
+			if (credential.isResolvable) {
+				// For resolvable credentials, the "connected" signal lives in the
+				// per-user storage — mirror that into the existing oauthTokenData
+				// flag the frontend banner already reads.
+				if (enriched.connectedByMe) {
+					decryptedData.oauthTokenData = true;
+				} else {
+					delete decryptedData.oauthTokenData;
+				}
+			} else if (decryptedData?.oauthTokenData) {
+				decryptedData.oauthTokenData = true;
+			}
+			return { data: decryptedData, ...enriched };
+		}
+
+		return { ...enriched };
 	}
 
-	async transferOne(user: User, credentialId: string, destinationProjectId: string) {
-		// 1. get credential
-		const credential = await this.sharedCredentialsRepository.findCredentialForUser(
+	/**
+	 * What a move into `destinationProjectId` would restrict. Refuses what the move refuses for
+	 * other reasons, so it never warns about a move that cannot happen.
+	 */
+	async previewTransfer(
+		user: User,
+		credentialId: string,
+		destinationProjectId: string,
+	): Promise<CredentialTransferPreview> {
+		const credential = await this.credentialsFinderService.findCredentialForUser(
 			credentialId,
 			user,
 			['credential:move'],
@@ -109,17 +212,6 @@ export class EnterpriseCredentialsService {
 			`Could not find the credential with the id "${credentialId}". Make sure you have the permission to move it.`,
 		);
 
-		// 2. get owner-sharing
-		const ownerSharing = credential.shared.find((s) => s.role === 'credential:owner');
-		NotFoundError.isDefinedAndNotNull(
-			ownerSharing,
-			`Could not find owner for credential "${credential.id}"`,
-		);
-
-		// 3. get source project
-		const sourceProject = ownerSharing.project;
-
-		// 4. get destination project
 		const destinationProject = await this.projectService.getProjectWithScope(
 			user,
 			destinationProjectId,
@@ -130,23 +222,47 @@ export class EnterpriseCredentialsService {
 			`Could not find project with the id "${destinationProjectId}". Make sure you have the permission to create credentials in it.`,
 		);
 
-		// 5. checks
-		if (sourceProject.id === destinationProject.id) {
-			throw new TransferCredentialError(
-				"You can't transfer a credential into the project that's already owning it.",
-			);
-		}
-		if (sourceProject.type !== 'team' && sourceProject.type !== 'personal') {
-			throw new TransferCredentialError(
-				'You can only transfer credentials out of personal or team projects.',
-			);
-		}
-		if (destinationProject.type !== 'team') {
-			throw new TransferCredentialError('You can only transfer credentials into team projects.');
-		}
+		await this.assertCanTransfer(user, credential, destinationProject);
+
+		const decision = await this.policyEnforcementService.evaluateCredentialTransfer({
+			credential: { id: credential.id, type: credential.type },
+			targetProjectId: destinationProject.id,
+		});
+
+		return { restricted: decision.violations, checkFailed: hasCheckErrors(decision) };
+	}
+
+	async transferOne(user: User, credentialId: string, destinationProjectId: string) {
+		// 1. get credential
+		const credential = await this.credentialsFinderService.findCredentialForUser(
+			credentialId,
+			user,
+			['credential:move'],
+		);
+		NotFoundError.isDefinedAndNotNull(
+			credential,
+			`Could not find the credential with the id "${credentialId}". Make sure you have the permission to move it.`,
+		);
+
+		// 2. get destination project
+		const destinationProject = await this.projectService.getProjectWithScope(
+			user,
+			destinationProjectId,
+			['credential:create'],
+		);
+		NotFoundError.isDefinedAndNotNull(
+			destinationProject,
+			`Could not find project with the id "${destinationProjectId}". Make sure you have the permission to create credentials in it.`,
+		);
+
+		// 3. checks
+		await this.assertCanTransfer(user, credential, destinationProject);
+
+		// 4. projects losing access — the move drops all their sharings
+		const affectedProjectIds = [...new Set(credential.shared.map((s) => s.projectId))];
 
 		await this.sharedCredentialsRepository.manager.transaction(async (trx) => {
-			// 6. transfer the credential
+			// 5. transfer the credential
 			// remove all sharings
 			await trx.remove(credential.shared);
 
@@ -158,6 +274,53 @@ export class EnterpriseCredentialsService {
 					role: 'credential:owner',
 				}),
 			);
+
+			// 6. drop connections for members who lost access in the new project
+			await this.connectionStatusProxy.cleanupOrphanedEntriesForProjects(
+				credential.id,
+				affectedProjectIds,
+				trx,
+			);
 		});
+	}
+
+	/** The move's refusals that are not policies. The preview runs them too. */
+	private async assertCanTransfer(
+		user: User,
+		credential: CredentialsEntity,
+		destinationProject: Project,
+	): Promise<void> {
+		const ownerSharing = credential.shared.find((s) => s.role === 'credential:owner');
+		NotFoundError.isDefinedAndNotNull(
+			ownerSharing,
+			`Could not find owner for credential "${credential.id}"`,
+		);
+
+		if (ownerSharing.project.id === destinationProject.id) {
+			throw new TransferCredentialError(
+				"You can't transfer a credential into the project that's already owning it.",
+			);
+		}
+
+		// Transferring an end-user credential into a project is equivalent to
+		// creating one there: same createEndUser gate, no personal projects.
+		if (credential.isResolvable) {
+			this.credentialsService.ensureEndUserCredentialAllowedInProject(destinationProject);
+			await this.credentialsService.ensureCanManageEndUserCredential(user, destinationProject.id);
+		}
+
+		// The destination project needs access to every external secret provider it references.
+		if (
+			this.licenseState.isExternalSecretsLicensed() &&
+			this.externalSecretsConfig.externalSecretsForProjects
+		) {
+			const decryptedData = await this.credentialsService.decrypt(credential, true);
+			await validateAccessToReferencedSecretProviders(
+				destinationProject.id,
+				decryptedData,
+				this.externalSecretsProviderAccessCheckService,
+				'transfer',
+			);
+		}
 	}
 }

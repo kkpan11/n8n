@@ -7,12 +7,18 @@ import type {
 	ILoadOptionsFunctions,
 	IWebhookFunctions,
 	JsonObject,
+	RequestPath,
+	WithRequestTarget,
 } from 'n8n-workflow';
-import { NodeApiError } from 'n8n-workflow';
+import { NodeApiError, requestPath, requestUrl } from 'n8n-workflow';
+
 import type {
 	WhatsAppAppWebhookSubscriptionsResponse,
 	WhatsAppAppWebhookSubscription,
 } from './types';
+import type { SendAndWaitConfig } from '../../utils/sendAndWait/utils';
+import { createUtmCampaignLink } from '../../utils/utilities';
+export const WHATSAPP_BASE_URL = 'https://graph.facebook.com/v13.0/';
 
 async function appAccessTokenRead(
 	this: IHookFunctions | IExecuteFunctions | ILoadOptionsFunctions | IWebhookFunctions,
@@ -42,14 +48,14 @@ async function appAccessTokenRead(
 async function whatsappApiRequest(
 	this: IHookFunctions | IExecuteFunctions | ILoadOptionsFunctions | IWebhookFunctions,
 	method: IHttpRequestMethods,
-	resource: string,
+	resource: RequestPath,
 	body?: { type: 'json'; payload: IDataObject } | { type: 'form'; payload: IDataObject },
 	qs: IDataObject = {},
 ): Promise<any> {
 	const tokenResponse = await appAccessTokenRead.call(this);
 	const appAccessToken = tokenResponse.access_token;
 
-	const options: IHttpRequestOptions = {
+	const options: WithRequestTarget<IHttpRequestOptions> = {
 		headers: {
 			accept: 'application/json',
 			authorization: `Bearer ${appAccessToken}`,
@@ -57,7 +63,7 @@ async function whatsappApiRequest(
 		method,
 		qs,
 		body: body?.payload,
-		url: `https://graph.facebook.com/v19.0${resource}`,
+		url: requestUrl`https://graph.facebook.com/v19.0${resource}`,
 		json: true,
 	};
 
@@ -75,7 +81,7 @@ export async function appWebhookSubscriptionList(
 	const response = (await whatsappApiRequest.call(
 		this,
 		'GET',
-		`/${appId}/subscriptions`,
+		requestPath`/${appId}/subscriptions`,
 	)) as WhatsAppAppWebhookSubscriptionsResponse;
 	return response.data;
 }
@@ -85,7 +91,7 @@ export async function appWebhookSubscriptionCreate(
 	appId: string,
 	subscription: IDataObject,
 ) {
-	return await whatsappApiRequest.call(this, 'POST', `/${appId}/subscriptions`, {
+	return await whatsappApiRequest.call(this, 'POST', requestPath`/${appId}/subscriptions`, {
 		type: 'form',
 		payload: { ...subscription },
 	});
@@ -96,8 +102,40 @@ export async function appWebhookSubscriptionDelete(
 	appId: string,
 	object: string,
 ) {
-	return await whatsappApiRequest.call(this, 'DELETE', `/${appId}/subscriptions`, {
+	return await whatsappApiRequest.call(this, 'DELETE', requestPath`/${appId}/subscriptions`, {
 		type: 'form',
 		payload: { object },
 	});
 }
+
+export const createMessage = (
+	sendAndWaitConfig: SendAndWaitConfig,
+	phoneNumberId: string,
+	recipientPhoneNumber: string,
+	instanceId: string,
+): WithRequestTarget<IHttpRequestOptions> => {
+	const buttons = sendAndWaitConfig.options.map((option) => {
+		return `*${option.label}:*\n_${option.url}_\n\n`;
+	});
+
+	let n8nAttribution: string = '';
+	if (sendAndWaitConfig.appendAttribution) {
+		const attributionText = 'This message was sent automatically with ';
+		const link = createUtmCampaignLink('n8n-nodes-base.whatsapp', instanceId);
+		n8nAttribution = `\n\n${attributionText}${link}`;
+	}
+
+	return {
+		baseURL: WHATSAPP_BASE_URL,
+		method: 'POST',
+		url: requestPath`${phoneNumberId}/messages`,
+		body: {
+			messaging_product: 'whatsapp',
+			text: {
+				body: `${sendAndWaitConfig.message}\n\n${buttons.join('')}${n8nAttribution}`,
+			},
+			type: 'text',
+			to: recipientPhoneNumber,
+		},
+	};
+};
